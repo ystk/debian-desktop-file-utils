@@ -1,3 +1,48 @@
+desktop-file-utils (0.20-0.1) unstable; urgency=low
+
+  * Non-maintainer upload.
+    + Remove myself from uploaders
+  * Imported Upstream version 0.20
+  * Remove patch unity-is-registered as it was merged upstream
+
+ -- Ondřej Surý <ondrej@debian.org>  Thu, 28 Jun 2012 12:00:01 +0200
+
+desktop-file-utils (0.18-1) unstable; urgency=low
+
+  * New upstream releases; closes: #575000.
+    - Fixes unguarded usage of variables in format strings, breaking the
+      build; closes: #643373.
+    - Add manpages for desktop-file-install, desktop-file-validate, and
+      update-desktop-database; closes: #284831; drop
+      debian/desktop-file-install.8 and debian/desktop-file-validate.1.  Stop
+      installing now useless upstream README.
+  * Update my email address in control.
+  * postrm: allow /usr/local/share/applications to be a symlink, in which case
+    it isn't rmdir-ed; closes: #567338.
+  * rules: remove snippet to strip emacs syntax file; the default lispdir
+    install path is detected correctly even without an emacs build-dep; there
+    is an example emacs autoload config snippet at the top of
+    /usr/share/emacs/site-lisp/desktop-entry-mode.el and in the Debian bug
+    report; closes: #570309.  Drop now empty debian/TODO.
+  * Add lintian override for the empty /usr/share/applications directory
+    shipped in desktop-file-utils; this is to allow creating an (empty)
+    mimeinfo database upon installation.
+  * Cleanup and upgrade packaging.
+    - Drop versions of build-deps when satisfied in oldstable.
+    - Switch from cdbs to dh --with autotools_dev (updates config.guess and
+      .sub); drop cdbs and gnome-pkg-tools build-deps, move to debhelper
+      compatibility level 9 and bump debhelper build-dep to >= 8.9.0~ -- this
+      brings dpkg-buildflags support.
+    - Upstream now only distributes .bz2 tarball so use these; switch to
+      debian/source/format 3.0 (quilt) and update watch file.
+    - Bump Standards-Version to 3.9.2.
+    - Update copyright with proper list of copyright holders.
+  * Add patch unity-is-registered from upstream repo taken from the Ubuntu
+    package to support Unity as desktop environment to minimize the Ubuntu
+    diff and not bark on Ubuntu .desktop files.
+
+ -- Loïc Minier <lool@debian.org>  Tue, 29 Nov 2011 00:08:14 +0100
+
 desktop-file-utils (0.15-2) unstable; urgency=low
 
   [ Loic Minier ]

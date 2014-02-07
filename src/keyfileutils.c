@@ -1,17 +1,19 @@
 /* keyfileutils.c: useful functions for GKeyFile
- * 
+ * vim: set ts=2 sw=2 et: */
+
+/*
  * Copyright (C) 2007 Vincent Untz <vuntz@gnome.org>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
  * as published by the Free Software Foundation; either version 2
  * of the License, or (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301,
@@ -61,16 +63,37 @@ dfu_key_file_rename_group (GKeyFile   *keyfile,
   return TRUE;
 }
 
-gboolean
-dfu_key_file_copy_key (GKeyFile   *keyfile,
-                       const char *fromgroup,
-                       const char *fromkey,
-                       const char *togroup,
-                       const char *tokey)
+void
+dfu_key_file_drop_locale_strings (GKeyFile   *keyfile,
+                                  const char *group,
+                                  const char *key)
+{
+  char  **keys;
+  gsize   len;
+  char   *prefix;
+  gsize   i;
+
+  keys = g_key_file_get_keys (keyfile, group, &len, NULL);
+  prefix = g_strdup_printf ("%s[", key);
+
+  for (i = 0; i < len; i++)
+    {
+      if (g_str_has_prefix (keys[i], prefix))
+        g_key_file_remove_key (keyfile, group, keys[i], NULL);
+    }
+
+  g_free (prefix);
+  g_strfreev (keys);
+}
+
+static gboolean
+_dfu_key_file_copy_key_helper (GKeyFile   *keyfile,
+                               const char *fromgroup,
+                               const char *fromkey,
+                               const char *togroup,
+                               const char *tokey)
 {
   char *value;
-
-  g_return_val_if_fail (keyfile != NULL, FALSE);
 
   if (!g_key_file_has_group (keyfile, fromgroup))
     return FALSE;
@@ -82,6 +105,56 @@ dfu_key_file_copy_key (GKeyFile   *keyfile,
   g_key_file_set_value (keyfile, togroup, tokey, value);
 
   g_free (value);
+
+  return TRUE;
+}
+
+gboolean
+dfu_key_file_copy_key (GKeyFile   *keyfile,
+                       const char *fromgroup,
+                       const char *fromkey,
+                       const char *togroup,
+                       const char *tokey)
+{
+  char  **fromkeys;
+  gsize   len;
+  char   *fromprefix;
+  gsize   i;
+
+  g_return_val_if_fail (keyfile != NULL, FALSE);
+  g_return_val_if_fail (fromgroup != NULL, FALSE);
+  g_return_val_if_fail (fromkey != NULL, FALSE);
+  g_return_val_if_fail (togroup != NULL, FALSE);
+  g_return_val_if_fail (tokey != NULL, FALSE);
+
+  if (!_dfu_key_file_copy_key_helper (keyfile, fromgroup, fromkey,
+                                      togroup, tokey))
+    return FALSE;
+
+  /* Also copy translations if we're not dealing with localized keys already
+   * (first drop old ones) */
+  if (strchr (fromkey, '[') != NULL || strchr (tokey, '[') != NULL)
+    return TRUE;
+
+  dfu_key_file_drop_locale_strings (keyfile, togroup, tokey);
+
+  fromkeys = g_key_file_get_keys (keyfile, fromgroup, &len, NULL);
+  fromprefix = g_strdup_printf ("%s[", fromkey);
+
+  for (i = 0; i < len; i++)
+    {
+      if (g_str_has_prefix (fromkeys[i], fromprefix))
+        {
+          const char *locale = fromkeys[i] + strlen (fromkey);
+          char       *tolocalekey = g_strdup_printf ("%s%s", tokey, locale);
+          _dfu_key_file_copy_key_helper (keyfile, fromgroup, fromkeys[i],
+                                         togroup, tolocalekey);
+          g_free (tolocalekey);
+        }
+    }
+
+  g_free (fromprefix);
+  g_strfreev (fromkeys);
 
   return TRUE;
 }
@@ -169,8 +242,8 @@ dfu_key_file_remove_list (GKeyFile   *keyfile,
 
 //FIXME: kill this when bug #309224 is fixed
 gboolean
-dfu_key_file_to_file (GKeyFile     *keyfile,
-                      const char   *file,
+dfu_key_file_to_path (GKeyFile     *keyfile,
+                      const char   *path,
                       GError      **error)
 {
   char    *filename;
@@ -180,7 +253,7 @@ dfu_key_file_to_file (GKeyFile     *keyfile,
   gboolean res;
 
   g_return_val_if_fail (keyfile != NULL, FALSE);
-  g_return_val_if_fail (file != NULL, FALSE);
+  g_return_val_if_fail (path != NULL, FALSE);
 
   write_error = NULL;
   data = g_key_file_to_data (keyfile, &length, &write_error);
@@ -189,10 +262,7 @@ dfu_key_file_to_file (GKeyFile     *keyfile,
     return FALSE;
   }
 
-  if (!g_path_is_absolute (file))
-    filename = g_filename_from_uri (file, NULL, &write_error);
-  else
-    filename = g_filename_from_utf8 (file, -1, NULL, NULL, &write_error);
+  filename = g_filename_from_utf8 (path, -1, NULL, NULL, &write_error);
 
   if (write_error) {
     g_propagate_error (error, write_error);

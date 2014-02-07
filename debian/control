@@ -2,16 +2,13 @@ Source: desktop-file-utils
 Section: devel
 Priority: optional
 Maintainer: Ross Burton <ross@debian.org>
-Uploaders: Ondřej Surý <ondrej@debian.org>,
-           Loic Minier <lool@dooz.org>,
+Uploaders: Loïc Minier <lool@debian.org>,
            Josselin Mouette <joss@debian.org>
-Build-Depends: debhelper (>= 5),
-               cdbs,
-               gnome-pkg-tools,
+Build-Depends: debhelper (>= 8.9.0~),
                autotools-dev,
-               libpopt-dev (>>1.5),
-               libglib2.0-dev (>= 2.2.0)
-Standards-Version: 3.8.1
+               libpopt-dev,
+               libglib2.0-dev
+Standards-Version: 3.9.2
 
 Package: desktop-file-utils
 Architecture: any
@@ -22,3 +19,4 @@ Description: Utilities for .desktop files
   * update-desktop-database -- update the desktop-MIME mapping
   * desktop-file-validate -- validate a desktop file
   * desktop-file-install -- install a desktop file, munging en route.
+

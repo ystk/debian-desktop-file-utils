@@ -1,13 +1,10 @@
-/* validate.c: validate a desktop entry file
+/* mimeutils.h: useful functions related to mime types
  * vim: set ts=2 sw=2 et: */
 
 /*
- * Copyright (C) 2007 Vincent Untz <vuntz@gnome.org>
+ * Copyright (C) 2008 Novell, Inc.
  *
- * A really small portion of this code comes from the old validate.c.
- * The old validate.c was Copyright (C) 2002  Red Hat, Inc.
- * It was written by:
- *  Havoc Pennington <hp@pobox.com>
+ * Written by Vincent Untz <vuntz@gnome.org>.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -27,14 +24,11 @@
 
 #include <glib.h>
 
-#define CURRENT_SPEC_VERSION "1.0"
+typedef enum {
+  MU_VALID,
+  MU_DISCOURAGED,
+  MU_INVALID
+} MimeUtilsValidity;
 
-#define GROUP_KDE_DESKTOP_ENTRY "KDE Desktop Entry"
-#define GROUP_DESKTOP_ACTION "Desktop Action "
-
-gboolean desktop_file_validate (const char *filename,
-				gboolean    warn_kde,
-				gboolean    no_warn_deprecated);
-gboolean desktop_file_fixup    (GKeyFile   *keyfile,
-                                const char *filename);
-
+MimeUtilsValidity mu_mime_type_is_valid (const char  *mime_type,
+                                         char       **error);

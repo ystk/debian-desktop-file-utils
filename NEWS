@@ -1,4 +1,116 @@
 ============
+Version 0.20
+============
+
+ desktop-file-install
+  - fix list of locale strings without trailing slash (Matthias Clasen)
+
+ desktop-file-validate
+  - add MATE and Razor to list of registered environments (Vincent)
+  - validate Desktop Actions (Giovanni Campagna, Vincent)
+
+============
+Version 0.19
+============
+
+ desktop-file-install
+   - respect order of edit options (Vincent)
+   - add --add-not-show-in/--remove-not-show-in options (Vincent)
+   - add options to set Name, GenericName, Comment, Icon keys (Vincent)
+   - add --set-key/--set-value options to set an arbitrary key (Vincent)
+   - remove localized keys when setting/removing a key (Vincent)
+   - copy translations when copying a key (Vincent)
+   - create a desktop-file-edit symlink to desktop-file-install to simply edit
+     .desktop files (without having to pass --dir) (Vincent)
+   - look at RPM_BUILD_ROOT to know where to install desktop files
+   - minor UI improvements (Vincent)
+
+ desktop-file-validate
+   - add Unity to list of registered environments (Vincent)
+   - deal with various zz-application/zz-winassoc-XXX mime types (Vincent)
+   - mark all zz-application/* MIME types as aliases (Vincent)
+   - add support for updated Keywords key (Vincent)
+
+ update-desktop-database
+   - deal with various zz-application/zz-winassoc-XXX mime types (Vincent)
+   - mark all zz-application/* MIME types as aliases (Vincent)
+   - ignore desktop files with Hidden=true (Vincent)
+
+ misc
+   - modernize build system a bit (Vincent)
+   - update man pages (Vincent)
+
+============
+Version 0.18
+============
+
+ desktop-file-validate
+   - accept x-scheme-handler/* mime types (Vincent)
+
+ update-desktop-database
+   - sort mime types alphabetically in generated cache (Vincent)
+   - accept x-scheme-handler/* mime types (Vincent)
+
+ misc
+   - improve build system (Vincent)
+   - minor documentation fixes (Vincent)
+
+============
+Version 0.17
+============
+
+ desktop-file-validate
+   - accept chemical/* mime types as valid types (Vincent)
+   - make icon names with an extension for Icon key a non-fatal error (Vincent)
+
+ update-desktop-database
+   - accept chemical/* mime types as valid types (Vincent)
+   - ignore --verbose if --quiet is also passed (Vincent)
+   - make sure to always output lists in the keyfile we generate (Vincent)
+
+ misc
+   - improve build system (Vincent)
+   - update documentation (Vincent)
+   - add man pages (Vincent)
+
+============
+Version 0.16
+============
+
+ desktop-file-install
+   - do not unlink the destination file if it's the same as the source file in
+     desktop-file-install (Vincent)
+
+ desktop-file-validate
+   - check that a main category is included in the Categories (Vincent)
+   - check that categories required by another one are present (Vincent)
+   - do not always show warnings about KDE specific uses (Vincent)
+   - check that the Comment does not look like the Name and the GenericName
+     (Vincent)
+   - display error about multiple keys with the same name earlier (Vincent)
+   - improve MIME type check to make sure that the MIME types are valid
+     (Vincent)
+   - add LXDE in the list of registered OnlyShowIn values (Vincent)
+   - add "warning" to error strings to make them easily greppable (Vincent)
+   - handle AutostartCondition key, as proposed for the autostart specification
+     and used in GNOME (Vincent)
+   - accept empty Categories key as valid (Vincent)
+   - make new errors non-fatal to give some time to maintainers to fix their
+     .desktop file after a release of desktop-file-utils (Vincent)
+   - plug leak (Vincent)
+   - code cleanups (Vincent)
+
+ update-desktop-database
+   - improve MIME type check to make sure that the MIME types are valid
+     (Vincent)
+   - improve error messages (Erik Hovland, Vincent)
+   - fix format string vulnerability warning (Vincent)
+
+ misc
+   - use AM_SILENT_RULES (Vincent)
+   - improve build system (Vincent)
+
+============
 Version 0.15
 ============
 
