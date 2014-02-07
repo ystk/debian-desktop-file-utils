@@ -1,12 +1,15 @@
 /* validate.c: validate a desktop entry file
- * 
- * Copyright (C) 2007 Vincent Untz <vuntz@gnome.org>
+ * vim: set ts=2 sw=2 et: */
+
+/*
+ * Copyright (C) 2007-2009 Vincent Untz <vuntz@gnome.org>
  *
  * A really small portion of this code comes from the old validate.c.
- * Authors of the old validate.c are:
- *  Mark McLoughlin
- *  Havoc Pennington
- *  Ray Strode
+ * The old validate.c was Copyright (C) 2002, 2004  Red Hat, Inc.
+ * It was written by:
+ *  Mark McLoughlin <mark@skynet.ie>
+ *  Havoc Pennington <hp@pobox.com>
+ *  Ray Strode <rstrode@redhat.com>
  *
  * A portion of this code comes from glib (gkeyfile.c)
  * Authors of gkeyfile.c are:
@@ -17,12 +20,12 @@
  * modify it under the terms of the GNU General Public License
  * as published by the Free Software Foundation; either version 2
  * of the License, or (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301,
@@ -40,10 +43,12 @@
 #include <glib/gstdio.h>
 
 #include "keyfileutils.h"
+#include "mimeutils.h"
 #include "validate.h"
 
-//FIXME: document where we are stricter than the spec
-// * only UTF-8 (so no Legacy-Mixed encoding)
+/*FIXME: document where we are stricter than the spec
+ * + only UTF-8 (so no Legacy-Mixed encoding)
+ */
 
 /*TODO:
  * + Lecagy-Mixed Encoding (annexe D)
@@ -79,6 +84,7 @@ typedef enum {
   DESKTOP_BOOLEAN_TYPE,
   DESKTOP_NUMERIC_TYPE,
   DESKTOP_STRING_LIST_TYPE,
+  DESKTOP_LOCALESTRING_LIST_TYPE,
   /* Deprecated types */
   /* since 0.9.6 */
   DESKTOP_REGEXP_LIST_TYPE
@@ -153,6 +159,11 @@ validate_regexp_list_key (kf_validator *kf,
                           const char   *key,
                           const char   *locale,
                           const char   *value);
+static gboolean
+validate_localestring_list_key (kf_validator *kf,
+                                const char   *key,
+                                const char   *locale,
+                                const char   *value);
 
 static gboolean
 handle_type_key (kf_validator *kf,
@@ -174,6 +185,10 @@ static gboolean
 handle_show_in_key (kf_validator *kf,
                     const char   *locale_key,
                     const char   *value);
+static gboolean
+handle_desktop_exec_key (kf_validator *kf,
+                         const char   *locale_key,
+                         const char   *value);
 static gboolean
 handle_exec_key (kf_validator *kf,
                  const char   *locale_key,
@@ -207,6 +222,10 @@ handle_encoding_key (kf_validator *kf,
                      const char   *locale_key,
                      const char   *value);
 static gboolean
+handle_autostart_condition_key (kf_validator *kf,
+                                const char   *locale_key,
+                                const char   *value);
+static gboolean
 handle_key_for_application (kf_validator *kf,
                             const char   *locale_key,
                             const char   *value);
@@ -223,7 +242,7 @@ handle_key_for_mimetype (kf_validator *kf,
                          const char   *locale_key,
                          const char   *value);
 
-struct {
+static struct {
   DesktopType  type;
   char        *name;
   gboolean     kde_reserved;
@@ -238,22 +257,23 @@ struct {
   { MIMETYPE_TYPE,     "MimeType",    FALSE, TRUE  }
 };
 
-struct {
+static struct {
   DesktopKeyType type;
   gboolean       (* validate) (kf_validator *kf,
                                const char   *key,
                                const char   *locale,
                                const char   *value);
 } validate_for_type[] = {
-  { DESKTOP_STRING_TYPE,       validate_string_key       },
-  { DESKTOP_LOCALESTRING_TYPE, validate_localestring_key },
-  { DESKTOP_BOOLEAN_TYPE,      validate_boolean_key      },
-  { DESKTOP_NUMERIC_TYPE,      validate_numeric_key      },
-  { DESKTOP_STRING_LIST_TYPE,  validate_string_list_key  },
-  { DESKTOP_REGEXP_LIST_TYPE,  validate_regexp_list_key  }
+  { DESKTOP_STRING_TYPE,            validate_string_key            },
+  { DESKTOP_LOCALESTRING_TYPE,      validate_localestring_key      },
+  { DESKTOP_BOOLEAN_TYPE,           validate_boolean_key           },
+  { DESKTOP_NUMERIC_TYPE,           validate_numeric_key           },
+  { DESKTOP_STRING_LIST_TYPE,       validate_string_list_key       },
+  { DESKTOP_REGEXP_LIST_TYPE,       validate_regexp_list_key       },
+  { DESKTOP_LOCALESTRING_LIST_TYPE, validate_localestring_list_key }
 };
 
-struct {
+typedef struct {
   DesktopKeyType  type;
   char           *name;
   gboolean        required;
@@ -262,108 +282,234 @@ struct {
   gboolean        (* handle_and_validate) (kf_validator *kf,
                                            const char   *locale_key,
                                            const char   *value);
-} registered_desktop_keys[] = {
-  { DESKTOP_STRING_TYPE,       "Type",              TRUE,  FALSE, FALSE, handle_type_key },
-  /* it is numeric according to the spec, but it's not true in previous 
-   * versions of the spec. handle_version_key() will manage this */
-  { DESKTOP_STRING_TYPE,       "Version",           FALSE, FALSE, FALSE, handle_version_key },
-  { DESKTOP_LOCALESTRING_TYPE, "Name",              TRUE,  FALSE, FALSE, NULL },
-  { DESKTOP_LOCALESTRING_TYPE, "GenericName",       FALSE, FALSE, FALSE, NULL },
-  { DESKTOP_BOOLEAN_TYPE,      "NoDisplay",         FALSE, FALSE, FALSE, NULL },
-  { DESKTOP_LOCALESTRING_TYPE, "Comment",           FALSE, FALSE, FALSE, handle_comment_key },
-  { DESKTOP_LOCALESTRING_TYPE, "Icon",              FALSE, FALSE, FALSE, handle_icon_key },
-  { DESKTOP_BOOLEAN_TYPE,      "Hidden",            FALSE, FALSE, FALSE, NULL },
-  { DESKTOP_STRING_LIST_TYPE,  "OnlyShowIn",        FALSE, FALSE, FALSE, handle_show_in_key },
-  { DESKTOP_STRING_LIST_TYPE,  "NotShowIn",         FALSE, FALSE, FALSE, handle_show_in_key },
-  { DESKTOP_STRING_TYPE,       "TryExec",           FALSE, FALSE, FALSE, handle_key_for_application },
-  { DESKTOP_STRING_TYPE,       "Exec",              FALSE, FALSE, FALSE, handle_exec_key },
-  { DESKTOP_STRING_TYPE,       "Path",              FALSE, FALSE, FALSE, handle_path_key },
-  { DESKTOP_BOOLEAN_TYPE,      "Terminal",          FALSE, FALSE, FALSE, handle_key_for_application },
-  { DESKTOP_STRING_LIST_TYPE,  "MimeType",          FALSE, FALSE, FALSE, handle_mime_key },
-  { DESKTOP_STRING_LIST_TYPE,  "Categories",        FALSE, FALSE, FALSE, handle_categories_key },
-  { DESKTOP_BOOLEAN_TYPE,      "StartupNotify",     FALSE, FALSE, FALSE, handle_key_for_application },
-  { DESKTOP_STRING_TYPE,       "StartupWMClass",    FALSE, FALSE, FALSE, handle_key_for_application },
-  { DESKTOP_STRING_TYPE,       "URL",               FALSE, FALSE, FALSE, handle_key_for_link },
+} DesktopKeyDefinition;
 
-  //FIXME: it's not deprecated, but got removed from the spec temporarly
-  { DESKTOP_STRING_LIST_TYPE,  "Actions",           FALSE, FALSE, FALSE, handle_actions_key },
+static DesktopKeyDefinition registered_desktop_keys[] = {
+  { DESKTOP_STRING_TYPE,            "Type",              TRUE,  FALSE, FALSE, handle_type_key },
+  /* it is numeric according to the spec, but it's not true in previous
+   * versions of the spec. handle_version_key() will manage this */
+  { DESKTOP_STRING_TYPE,            "Version",           FALSE, FALSE, FALSE, handle_version_key },
+  { DESKTOP_LOCALESTRING_TYPE,      "Name",              TRUE,  FALSE, FALSE, NULL },
+  { DESKTOP_LOCALESTRING_TYPE,      "GenericName",       FALSE, FALSE, FALSE, NULL },
+  { DESKTOP_BOOLEAN_TYPE,           "NoDisplay",         FALSE, FALSE, FALSE, NULL },
+  { DESKTOP_LOCALESTRING_TYPE,      "Comment",           FALSE, FALSE, FALSE, handle_comment_key },
+  { DESKTOP_LOCALESTRING_TYPE,      "Icon",              FALSE, FALSE, FALSE, handle_icon_key },
+  { DESKTOP_BOOLEAN_TYPE,           "Hidden",            FALSE, FALSE, FALSE, NULL },
+  { DESKTOP_STRING_LIST_TYPE,       "OnlyShowIn",        FALSE, FALSE, FALSE, handle_show_in_key },
+  { DESKTOP_STRING_LIST_TYPE,       "NotShowIn",         FALSE, FALSE, FALSE, handle_show_in_key },
+  { DESKTOP_STRING_TYPE,            "TryExec",           FALSE, FALSE, FALSE, handle_key_for_application },
+  { DESKTOP_STRING_TYPE,            "Exec",              FALSE, FALSE, FALSE, handle_desktop_exec_key },
+  { DESKTOP_STRING_TYPE,            "Path",              FALSE, FALSE, FALSE, handle_path_key },
+  { DESKTOP_BOOLEAN_TYPE,           "Terminal",          FALSE, FALSE, FALSE, handle_key_for_application },
+  { DESKTOP_STRING_LIST_TYPE,       "MimeType",          FALSE, FALSE, FALSE, handle_mime_key },
+  { DESKTOP_STRING_LIST_TYPE,       "Categories",        FALSE, FALSE, FALSE, handle_categories_key },
+  { DESKTOP_BOOLEAN_TYPE,           "StartupNotify",     FALSE, FALSE, FALSE, handle_key_for_application },
+  { DESKTOP_STRING_TYPE,            "StartupWMClass",    FALSE, FALSE, FALSE, handle_key_for_application },
+  { DESKTOP_STRING_TYPE,            "URL",               FALSE, FALSE, FALSE, handle_key_for_link },
+  /* since 1.1 (used to be a key reserved for KDE since 0.9.4) */
+  { DESKTOP_LOCALESTRING_LIST_TYPE, "Keywords",          FALSE, FALSE, FALSE, NULL },
+  /* since 1.1 (used to be in the spec before 1.0, but was not really
+   * specified) */
+  { DESKTOP_STRING_LIST_TYPE,       "Actions",           FALSE, FALSE, FALSE, handle_actions_key },
 
   /* Keys reserved for KDE */
 
   /* since 0.9.4 */
-  { DESKTOP_STRING_TYPE,       "ServiceTypes",      FALSE, FALSE, TRUE,  NULL },
-  { DESKTOP_STRING_TYPE,       "DocPath",           FALSE, FALSE, TRUE,  NULL },
-  { DESKTOP_LOCALESTRING_TYPE, "Keywords",          FALSE, FALSE, TRUE,  NULL },
-  { DESKTOP_STRING_TYPE,       "InitialPreference", FALSE, FALSE, TRUE,  NULL },
+  { DESKTOP_STRING_TYPE,            "ServiceTypes",      FALSE, FALSE, TRUE,  NULL },
+  { DESKTOP_STRING_TYPE,            "DocPath",           FALSE, FALSE, TRUE,  NULL },
+  { DESKTOP_STRING_TYPE,            "InitialPreference", FALSE, FALSE, TRUE,  NULL },
   /* since 0.9.6 */
-  { DESKTOP_STRING_TYPE,       "Dev",               FALSE, FALSE, TRUE,  handle_dev_key },
-  { DESKTOP_STRING_TYPE,       "FSType",            FALSE, FALSE, TRUE,  handle_key_for_fsdevice },
-  { DESKTOP_STRING_TYPE,       "MountPoint",        FALSE, FALSE, TRUE,  handle_mountpoint_key },
-  { DESKTOP_BOOLEAN_TYPE,      "ReadOnly",          FALSE, FALSE, TRUE,  handle_key_for_fsdevice },
-  { DESKTOP_STRING_TYPE,       "UnmountIcon",       FALSE, FALSE, TRUE,  handle_key_for_fsdevice },
+  { DESKTOP_STRING_TYPE,            "Dev",               FALSE, FALSE, TRUE,  handle_dev_key },
+  { DESKTOP_STRING_TYPE,            "FSType",            FALSE, FALSE, TRUE,  handle_key_for_fsdevice },
+  { DESKTOP_STRING_TYPE,            "MountPoint",        FALSE, FALSE, TRUE,  handle_mountpoint_key },
+  { DESKTOP_BOOLEAN_TYPE,           "ReadOnly",          FALSE, FALSE, TRUE,  handle_key_for_fsdevice },
+  { DESKTOP_STRING_TYPE,            "UnmountIcon",       FALSE, FALSE, TRUE,  handle_key_for_fsdevice },
 
   /* Deprecated keys */
 
   /* since 0.9.3 */
-  { DESKTOP_STRING_TYPE,       "Protocols",         FALSE, TRUE,  FALSE, NULL },
-  { DESKTOP_STRING_TYPE,       "Extensions",        FALSE, TRUE,  FALSE, NULL },
-  { DESKTOP_STRING_TYPE,       "BinaryPattern",     FALSE, TRUE,  FALSE, NULL },
-  { DESKTOP_STRING_TYPE,       "MapNotify",         FALSE, TRUE,  FALSE, NULL },
+  { DESKTOP_STRING_TYPE,            "Protocols",         FALSE, TRUE,  FALSE, NULL },
+  { DESKTOP_STRING_TYPE,            "Extensions",        FALSE, TRUE,  FALSE, NULL },
+  { DESKTOP_STRING_TYPE,            "BinaryPattern",     FALSE, TRUE,  FALSE, NULL },
+  { DESKTOP_STRING_TYPE,            "MapNotify",         FALSE, TRUE,  FALSE, NULL },
   /* since 0.9.4 */
-  { DESKTOP_REGEXP_LIST_TYPE,  "Patterns",          FALSE, TRUE,  FALSE, handle_key_for_mimetype },
-  { DESKTOP_STRING_TYPE,       "DefaultApp",        FALSE, TRUE,  FALSE, handle_key_for_mimetype },
-  { DESKTOP_STRING_TYPE,       "MiniIcon",          FALSE, TRUE,  FALSE, NULL },
-  { DESKTOP_STRING_TYPE,       "TerminalOptions",   FALSE, TRUE,  FALSE, NULL },
+  { DESKTOP_REGEXP_LIST_TYPE,       "Patterns",          FALSE, TRUE,  FALSE, handle_key_for_mimetype },
+  { DESKTOP_STRING_TYPE,            "DefaultApp",        FALSE, TRUE,  FALSE, handle_key_for_mimetype },
+  { DESKTOP_STRING_TYPE,            "MiniIcon",          FALSE, TRUE,  FALSE, NULL },
+  { DESKTOP_STRING_TYPE,            "TerminalOptions",   FALSE, TRUE,  FALSE, NULL },
   /* since 0.9.5 */
-  { DESKTOP_STRING_TYPE,       "Encoding",          FALSE, TRUE,  FALSE, handle_encoding_key },
-  { DESKTOP_LOCALESTRING_TYPE, "SwallowTitle",      FALSE, TRUE,  FALSE, NULL },
-  { DESKTOP_STRING_TYPE,       "SwallowExec",       FALSE, TRUE,  FALSE, NULL },
+  { DESKTOP_STRING_TYPE,            "Encoding",          FALSE, TRUE,  FALSE, handle_encoding_key },
+  { DESKTOP_LOCALESTRING_TYPE,      "SwallowTitle",      FALSE, TRUE,  FALSE, NULL },
+  { DESKTOP_STRING_TYPE,            "SwallowExec",       FALSE, TRUE,  FALSE, NULL },
   /* since 0.9.6 */
-  { DESKTOP_STRING_LIST_TYPE,  "SortOrder",         FALSE, TRUE,  FALSE, NULL },
-  { DESKTOP_REGEXP_LIST_TYPE,  "FilePattern",       FALSE, TRUE,  FALSE, NULL }
+  { DESKTOP_STRING_LIST_TYPE,       "SortOrder",         FALSE, TRUE,  FALSE, NULL },
+  { DESKTOP_REGEXP_LIST_TYPE,       "FilePattern",       FALSE, TRUE,  FALSE, NULL },
+
+  /* Keys from other specifications */
+
+  /* Autostart spec, currently proposed; adopted by GNOME */
+  { DESKTOP_STRING_TYPE,            "AutostartCondition", FALSE, FALSE, FALSE, handle_autostart_condition_key }
+};
+
+static DesktopKeyDefinition registered_action_keys[] = {
+  { DESKTOP_LOCALESTRING_TYPE,      "Name",               TRUE,  FALSE, FALSE, NULL },
+  { DESKTOP_LOCALESTRING_TYPE,      "Icon",               FALSE, FALSE, FALSE, handle_icon_key },
+  { DESKTOP_STRING_LIST_TYPE,       "OnlyShowIn",         FALSE, FALSE, FALSE, handle_show_in_key },
+  { DESKTOP_STRING_LIST_TYPE,       "NotShowIn",          FALSE, FALSE, FALSE, handle_show_in_key },
+  { DESKTOP_STRING_TYPE,            "Exec",               TRUE,  FALSE, FALSE, handle_exec_key }
 };
 
 static const char *show_in_registered[] = {
-  "KDE", "GNOME", "ROX", "XFCE", "Old"
+  "GNOME", "KDE", "LXDE", "MATE", "Razor", "ROX", "Unity", "XFCE", "Old"
 };
 
-static const char *main_categories_registered[] = {
-  "AudioVideo", "Audio", "Video", "Development", "Education", "Game",
-  "Graphics", "Network", "Office", "Settings", "System", "Utility"
-};
-
-static const char *additional_categories_registered[] = {
-  "Building", "Debugger", "IDE", "GUIDesigner", "Profiling", "RevisionControl",
-  "Translation", "Calendar", "ContactManagement", "Database", "Dictionary",
-  "Chart", "Email", "Finance", "FlowChart", "PDA", "ProjectManagement",
-  "Presentation", "Spreadsheet", "WordProcessor", "2DGraphics",
-  "VectorGraphics", "RasterGraphics", "3DGraphics", "Scanning", "OCR",
-  "Photography", "Publishing", "Viewer", "TextTools", "DesktopSettings",
-  "HardwareSettings", "Printing", "PackageManager", "Dialup",
-  "InstantMessaging", "Chat", "IRCClient", "FileTransfer", "HamRadio", "News",
-  "P2P", "RemoteAccess", "Telephony", "TelephonyTools", "VideoConference",
-  "WebBrowser", "WebDevelopment", "Midi", "Mixer", "Sequencer", "Tuner", "TV",
-  "AudioVideoEditing", "Player", "Recorder", "DiscBurning", "ActionGame",
-  "AdventureGame", "ArcadeGame", "BoardGame", "BlocksGame", "CardGame",
-  "KidsGame", "LogicGame", "RolePlaying", "Simulation", "SportsGame",
-  "StrategyGame", "Art", "Construction", "Music", "Languages", "Science",
-  "ArtificialIntelligence", "Astronomy", "Biology", "Chemistry",
-  "ComputerScience", "DataVisualization", "Economy", "Electricity",
-  "Geography", "Geology", "Geoscience", "History", "ImageProcessing",
-  "Literature", "Math", "NumericalAnalysis", "MedicalSoftware", "Physics",
-  "Robotics", "Sports", "ParallelComputing", "Amusement", "Archiving",
-  "Compression", "Electronics", "Emulator", "Engineering", "FileTools",
-  "FileManager", "TerminalEmulator", "Filesystem", "Monitor", "Security",
-  "Accessibility", "Calculator", "Clock", "TextEditor", "Documentation",
-  "Core", "KDE", "GNOME", "GTK", "Qt", "Motif", "Java", "ConsoleOnly"
-};
-
-static const char *reserved_categories_registered[] = {
-  "Screensaver", "TrayIcon", "Applet", "Shell"
-};
-
-static const char *deprecated_categories_registered[] = {
-  "Application", "Applications"
+static struct {
+  const char *name;
+  gboolean    main;
+  gboolean    require_only_show_in;
+  gboolean    deprecated;
+  const char *requires[4];
+} registered_categories[] = {
+  { "AudioVideo",             TRUE,  FALSE, FALSE, { NULL } },
+  { "Audio",                  TRUE,  FALSE, FALSE, { "AudioVideo", NULL } },
+  { "Video",                  TRUE,  FALSE, FALSE, { "AudioVideo", NULL } },
+  { "Development",            TRUE,  FALSE, FALSE, { NULL } },
+  { "Education",              TRUE,  FALSE, FALSE, { NULL } },
+  { "Game",                   TRUE,  FALSE, FALSE, { NULL } },
+  { "Graphics",               TRUE,  FALSE, FALSE, { NULL } },
+  { "Network",                TRUE,  FALSE, FALSE, { NULL } },
+  { "Office",                 TRUE,  FALSE, FALSE, { NULL } },
+  { "Settings",               TRUE,  FALSE, FALSE, { NULL } },
+  { "System",                 TRUE,  FALSE, FALSE, { NULL } },
+  { "Utility",                TRUE,  FALSE, FALSE, { NULL } },
+  { "Audio",                  FALSE, FALSE, FALSE, { "Development", NULL } },
+  { "Video",                  FALSE, FALSE, FALSE, { "Development", NULL } },
+  { "Building",               FALSE, FALSE, FALSE, { "Development", NULL } },
+  { "Debugger",               FALSE, FALSE, FALSE, { "Development", NULL } },
+  { "IDE",                    FALSE, FALSE, FALSE, { "Development", NULL } },
+  { "GUIDesigner",            FALSE, FALSE, FALSE, { "Development", NULL } },
+  { "Profiling",              FALSE, FALSE, FALSE, { "Development", NULL } },
+  { "RevisionControl",        FALSE, FALSE, FALSE, { "Development", NULL } },
+  { "Translation",            FALSE, FALSE, FALSE, { "Development", NULL } },
+  { "Calendar",               FALSE, FALSE, FALSE, { "Office", NULL } },
+  { "ContactManagement",      FALSE, FALSE, FALSE, { "Office", NULL } },
+  { "Database",               FALSE, FALSE, FALSE, { "Office", "Development", "AudioVideo", NULL } },
+  { "Dictionary",             FALSE, FALSE, FALSE, { "Office;TextTools", NULL } },
+  { "Chart",                  FALSE, FALSE, FALSE, { "Office", NULL } },
+  { "Email",                  FALSE, FALSE, FALSE, { "Office;Network", NULL } },
+  { "Finance",                FALSE, FALSE, FALSE, { "Office", NULL } },
+  { "FlowChart",              FALSE, FALSE, FALSE, { "Office", NULL } },
+  { "PDA",                    FALSE, FALSE, FALSE, { "Office", NULL } },
+  { "ProjectManagement",      FALSE, FALSE, FALSE, { "Office;Development", NULL } },
+  { "Presentation",           FALSE, FALSE, FALSE, { "Office", NULL } },
+  { "Spreadsheet",            FALSE, FALSE, FALSE, { "Office", NULL } },
+  { "WordProcessor",          FALSE, FALSE, FALSE, { "Office", NULL } },
+  { "2DGraphics",             FALSE, FALSE, FALSE, { "Graphics", NULL } },
+  { "VectorGraphics",         FALSE, FALSE, FALSE, { "Graphics;2DGraphics", NULL } },
+  { "RasterGraphics",         FALSE, FALSE, FALSE, { "Graphics;2DGraphics", NULL } },
+  { "3DGraphics",             FALSE, FALSE, FALSE, { "Graphics", NULL } },
+  { "Scanning",               FALSE, FALSE, FALSE, { "Graphics", NULL } },
+  { "OCR",                    FALSE, FALSE, FALSE, { "Graphics;Scanning", NULL } },
+  { "Photography",            FALSE, FALSE, FALSE, { "Graphics", "Office", NULL } },
+  { "Publishing",             FALSE, FALSE, FALSE, { "Graphics", "Office", NULL } },
+  { "Viewer",                 FALSE, FALSE, FALSE, { "Graphics", "Office", NULL } },
+  { "TextTools",              FALSE, FALSE, FALSE, { "Utility", NULL } },
+  { "DesktopSettings",        FALSE, FALSE, FALSE, { "Settings", NULL } },
+  { "HardwareSettings",       FALSE, FALSE, FALSE, { "Settings", NULL } },
+  { "Printing",               FALSE, FALSE, FALSE, { "HardwareSettings;Settings", NULL } },
+  { "PackageManager",         FALSE, FALSE, FALSE, { "Settings", NULL } },
+  { "Dialup",                 FALSE, FALSE, FALSE, { "Network", NULL } },
+  { "InstantMessaging",       FALSE, FALSE, FALSE, { "Network", NULL } },
+  { "Chat",                   FALSE, FALSE, FALSE, { "Network", NULL } },
+  { "IRCClient",              FALSE, FALSE, FALSE, { "Network", NULL } },
+  { "FileTransfer",           FALSE, FALSE, FALSE, { "Network", NULL } },
+  { "HamRadio",               FALSE, FALSE, FALSE, { "Network", "Audio", NULL } },
+  { "News",                   FALSE, FALSE, FALSE, { "Network", NULL } },
+  { "P2P",                    FALSE, FALSE, FALSE, { "Network", NULL } },
+  { "RemoteAccess",           FALSE, FALSE, FALSE, { "Network", NULL } },
+  { "Telephony",              FALSE, FALSE, FALSE, { "Network", NULL } },
+  { "TelephonyTools",         FALSE, FALSE, FALSE, { "Utility", NULL } },
+  { "VideoConference",        FALSE, FALSE, FALSE, { "Network", NULL } },
+  { "WebBrowser",             FALSE, FALSE, FALSE, { "Network", NULL } },
+  { "WebDevelopment",         FALSE, FALSE, FALSE, { "Network", "Development", NULL } },
+  { "Midi",                   FALSE, FALSE, FALSE, { "AudioVideo;Audio", NULL } },
+  { "Mixer",                  FALSE, FALSE, FALSE, { "AudioVideo;Audio", NULL } },
+  { "Sequencer",              FALSE, FALSE, FALSE, { "AudioVideo;Audio", NULL } },
+  { "Tuner",                  FALSE, FALSE, FALSE, { "AudioVideo;Audio", NULL } },
+  { "TV",                     FALSE, FALSE, FALSE, { "AudioVideo;Video", NULL } },
+  { "AudioVideoEditing",      FALSE, FALSE, FALSE, { "Audio", "Video", "AudioVideo", NULL } },
+  { "Player",                 FALSE, FALSE, FALSE, { "Audio", "Video", "AudioVideo", NULL } },
+  { "Recorder",               FALSE, FALSE, FALSE, { "Audio", "Video", "AudioVideo", NULL } },
+  { "DiscBurning",            FALSE, FALSE, FALSE, { "Audio", "Video", "AudioVideo", NULL } },
+  { "ActionGame",             FALSE, FALSE, FALSE, { "Game", NULL } },
+  { "AdventureGame",          FALSE, FALSE, FALSE, { "Game", NULL } },
+  { "ArcadeGame",             FALSE, FALSE, FALSE, { "Game", NULL } },
+  { "BoardGame",              FALSE, FALSE, FALSE, { "Game", NULL } },
+  { "BlocksGame",             FALSE, FALSE, FALSE, { "Game", NULL } },
+  { "CardGame",               FALSE, FALSE, FALSE, { "Game", NULL } },
+  { "KidsGame",               FALSE, FALSE, FALSE, { "Game", NULL } },
+  { "LogicGame",              FALSE, FALSE, FALSE, { "Game", NULL } },
+  { "RolePlaying",            FALSE, FALSE, FALSE, { "Game", NULL } },
+  { "Simulation",             FALSE, FALSE, FALSE, { "Game", NULL } },
+  { "SportsGame",             FALSE, FALSE, FALSE, { "Game", NULL } },
+  { "StrategyGame",           FALSE, FALSE, FALSE, { "Game", NULL } },
+  { "Art",                    FALSE, FALSE, FALSE, { "Education", NULL } },
+  { "Construction",           FALSE, FALSE, FALSE, { "Education", NULL } },
+  { "Music",                  FALSE, FALSE, FALSE, { "AudioVideo;Education", NULL } },
+  { "Languages",              FALSE, FALSE, FALSE, { "Education", NULL } },
+  { "Science",                FALSE, FALSE, FALSE, { "Education", NULL } },
+  { "ArtificialIntelligence", FALSE, FALSE, FALSE, { "Education;Science", NULL } },
+  { "Astronomy",              FALSE, FALSE, FALSE, { "Education;Science", NULL } },
+  { "Biology",                FALSE, FALSE, FALSE, { "Education;Science", NULL } },
+  { "Chemistry",              FALSE, FALSE, FALSE, { "Education;Science", NULL } },
+  { "ComputerScience",        FALSE, FALSE, FALSE, { "Education;Science", NULL } },
+  { "DataVisualization",      FALSE, FALSE, FALSE, { "Education;Science", NULL } },
+  { "Economy",                FALSE, FALSE, FALSE, { "Education", NULL } },
+  { "Electricity",            FALSE, FALSE, FALSE, { "Education;Science", NULL } },
+  { "Geography",              FALSE, FALSE, FALSE, { "Education", NULL } },
+  { "Geology",                FALSE, FALSE, FALSE, { "Education;Science", NULL } },
+  { "Geoscience",             FALSE, FALSE, FALSE, { "Education;Science", NULL } },
+  { "History",                FALSE, FALSE, FALSE, { "Education", NULL } },
+  { "ImageProcessing",        FALSE, FALSE, FALSE, { "Education;Science", NULL } },
+  { "Literature",             FALSE, FALSE, FALSE, { "Education", NULL } },
+  { "Math",                   FALSE, FALSE, FALSE, { "Education;Science", NULL } },
+  { "NumericalAnalysis",      FALSE, FALSE, FALSE, { "Education;Science;Math", NULL } },
+  { "MedicalSoftware",        FALSE, FALSE, FALSE, { "Education;Science", NULL } },
+  { "Physics",                FALSE, FALSE, FALSE, { "Education;Science", NULL } },
+  { "Robotics",               FALSE, FALSE, FALSE, { "Education;Science", NULL } },
+  { "Sports",                 FALSE, FALSE, FALSE, { "Education", NULL } },
+  { "ParallelComputing",      FALSE, FALSE, FALSE, { "Education;Science;ComputerScience", NULL } },
+  { "Amusement",              FALSE, FALSE, FALSE, { NULL } },
+  { "Archiving",              FALSE, FALSE, FALSE, { "Utility", NULL } },
+  { "Compression",            FALSE, FALSE, FALSE, { "Utility;Archiving", NULL } },
+  { "Electronics",            FALSE, FALSE, FALSE, { NULL } },
+  { "Emulator",               FALSE, FALSE, FALSE, { "System", "Game", NULL } },
+  { "Engineering",            FALSE, FALSE, FALSE, { NULL } },
+  { "FileTools",              FALSE, FALSE, FALSE, { "Utility", "System", NULL } },
+  { "FileManager",            FALSE, FALSE, FALSE, { "System;FileTools", NULL } },
+  { "TerminalEmulator",       FALSE, FALSE, FALSE, { "System", NULL } },
+  { "Filesystem",             FALSE, FALSE, FALSE, { "System", NULL } },
+  { "Monitor",                FALSE, FALSE, FALSE, { "System", NULL } },
+  { "Security",               FALSE, FALSE, FALSE, { "Settings", "System", NULL } },
+  { "Accessibility",          FALSE, FALSE, FALSE, { "Settings", "Utility", NULL } },
+  { "Calculator",             FALSE, FALSE, FALSE, { "Utility", NULL } },
+  { "Clock",                  FALSE, FALSE, FALSE, { "Utility", NULL } },
+  { "TextEditor",             FALSE, FALSE, FALSE, { "Utility", NULL } },
+  { "Documentation",          FALSE, FALSE, FALSE, { NULL } },
+  { "Core",                   FALSE, FALSE, FALSE, { NULL } },
+  { "KDE",                    FALSE, FALSE, FALSE, { "Qt", NULL } },
+  { "GNOME",                  FALSE, FALSE, FALSE, { "GTK", NULL } },
+  { "GTK",                    FALSE, FALSE, FALSE, { NULL } },
+  { "Qt",                     FALSE, FALSE, FALSE, { NULL } },
+  { "Motif",                  FALSE, FALSE, FALSE, { NULL } },
+  { "Java",                   FALSE, FALSE, FALSE, { NULL } },
+  { "ConsoleOnly",            FALSE, FALSE, FALSE, { NULL } },
+  { "Screensaver",            FALSE, TRUE,  FALSE, { NULL } },
+  { "TrayIcon",               FALSE, TRUE,  FALSE, { NULL } },
+  { "Applet",                 FALSE, TRUE,  FALSE, { NULL } },
+  { "Shell",                  FALSE, TRUE,  FALSE, { NULL } },
+  { "Application",            FALSE, FALSE, TRUE,  { NULL } },
+  { "Applications",           FALSE, FALSE, TRUE,  { NULL } }
 };
 
 static void
@@ -371,7 +517,7 @@ print_fatal (kf_validator *kf, const char *format, ...)
 {
   va_list args;
   gchar *str;
-  
+
   g_return_if_fail (kf != NULL && format != NULL);
 
   kf->fatal_error = TRUE;
@@ -381,7 +527,24 @@ print_fatal (kf_validator *kf, const char *format, ...)
   va_end (args);
 
   g_print ("%s: error: %s", kf->filename, str);
-  
+
+  g_free (str);
+}
+
+static void
+print_future_fatal (kf_validator *kf, const char *format, ...)
+{
+  va_list args;
+  gchar *str;
+
+  g_return_if_fail (kf != NULL && format != NULL);
+
+  va_start (args, format);
+  str = g_strdup_vprintf (format, args);
+  va_end (args);
+
+  g_print ("%s: error: (will be fatal in the future): %s", kf->filename, str);
+
   g_free (str);
 }
 
@@ -390,7 +553,7 @@ print_warning (kf_validator *kf, const char *format, ...)
 {
   va_list args;
   gchar *str;
-  
+
   g_return_if_fail (kf != NULL && format != NULL);
 
   va_start (args, format);
@@ -400,6 +563,25 @@ print_warning (kf_validator *kf, const char *format, ...)
   g_print ("%s: warning: %s", kf->filename, str);
 
   g_free (str);
+}
+
+/* + Key names must contain only the characters A-Za-z0-9-.
+ *   Checked.
+ */
+static gboolean
+key_is_valid (const char *key,
+              int         len)
+{
+  char c;
+  int i;
+
+  for (i = 0; i < len; i++) {
+    c = key[i];
+    if (!g_ascii_isalnum (c) && c != '-')
+      return FALSE;
+  }
+
+  return TRUE;
 }
 
 /* + Values of type string may contain all ASCII characters except for control
@@ -526,7 +708,7 @@ validate_numeric_key (kf_validator *kf,
 {
   float d;
   int res;
-  
+
   res = sscanf (value, "%f", &d);
   if (res == 0) {
     print_fatal (kf, "value \"%s\" for numeric key \"%s\" in group \"%s\" "
@@ -615,6 +797,79 @@ validate_regexp_list_key (kf_validator *kf,
   return validate_string_regexp_list_key (kf, key, locale, value, "regexp");
 }
 
+/* + Values of type localestring are user displayable, and are encoded in
+ *   UTF-8.
+ *   FIXME: partly checked; we checked the whole value is encored in UTF-8, but
+ *   not that each value of the list is. Although this might be equivalent?
+ * + If a postfixed key occurs, the same key must be also present without the
+ *   postfix.
+ *   Checked.
+ * + The multiple values should be separated by a semicolon. Those keys which
+ *   have several values should have a semicolon as the trailing character.
+ *   FIXME: partly checked. We use checks that work for sure for ascii
+ *   characters, but that could possibly fail in some weird UTF-8 strings.
+ * + FIXME: how should an empty list be handled?
+ */
+static gboolean
+validate_localestring_list_key (kf_validator *kf,
+                                const char   *key,
+                                const char   *locale,
+                                const char   *value)
+{
+  char     *locale_key;
+  int       len;
+
+  if (locale)
+    locale_key = g_strdup_printf ("%s[%s]", key, locale);
+  else
+    locale_key = g_strdup_printf ("%s", key);
+
+
+  if (!g_utf8_validate (value, -1, NULL)) {
+    print_fatal (kf, "value \"%s\" for locale string list key \"%s\" in group "
+                     "\"%s\" contains invalid UTF-8 characters, locale string "
+                     "list values should be encoded in UTF-8\n",
+                     value, locale_key, kf->current_group);
+    g_free (locale_key);
+
+    return FALSE;
+  }
+
+  len = strlen (value);
+
+  if (len > 0 && value[len - 1] != ';') {
+    print_fatal (kf, "value \"%s\" for locale string list key \"%s\" in group "
+                     "\"%s\" does not have a semicolon (';') as trailing "
+                     "character\n",
+                     value, locale_key, kf->current_group);
+
+    return FALSE;
+  }
+
+  if (len > 1 && value[len - 1] == ';' && value[len - 2] == '\\' &&
+      (len < 3 || value[len - 3] != '\\')) {
+    print_fatal (kf, "value \"%s\" for locale string list key \"%s\" in group "
+                     "\"%s\" has an escaped semicolon (';') as trailing "
+                     "character\n",
+                     value, locale_key, kf->current_group);
+
+    return FALSE;
+  }
+
+  if (!g_hash_table_lookup (kf->current_keys, key)) {
+    print_fatal (kf, "key \"%s\" in group \"%s\" is a localized key, but "
+                     "there is no non-localized key \"%s\"\n",
+                     locale_key, kf->current_group, key);
+    g_free (locale_key);
+
+    return FALSE;
+  }
+
+  g_free (locale_key);
+
+  return TRUE;
+}
+
 /* + This specification defines 3 types of desktop entries: Application
  *   (type 1), Link (type 2) and Directory (type 3). To allow the addition of
  *   new types in the future, implementations should ignore desktop entries
@@ -692,13 +947,42 @@ handle_version_key (kf_validator *kf,
 
 /* + Tooltip for the entry, for example "View sites on the Internet", should
  *   not be redundant with Name or GenericName.
- *   FIXME
+ *   Checked.
  */
 static gboolean
 handle_comment_key (kf_validator *kf,
                     const char   *locale_key,
                     const char   *value)
 {
+  char        *locale_compare_key;
+  kf_keyvalue *keyvalue;
+
+  locale_compare_key = g_strdup_printf ("Name%s",
+                                        locale_key + strlen ("Comment"));
+  keyvalue = g_hash_table_lookup (kf->current_keys, locale_compare_key);
+  g_free (locale_compare_key);
+
+  if (keyvalue && g_ascii_strcasecmp (value, keyvalue->value) == 0) {
+    print_warning (kf, "value \"%s\" for key \"%s\" in group \"%s\" "
+                       "looks redundant with value \"%s\" of key \"%s\"\n",
+                       value, locale_key, kf->current_group,
+                       keyvalue->value, keyvalue->key);
+    return FALSE;
+  }
+
+  locale_compare_key = g_strdup_printf ("GenericName%s",
+                                        locale_key + strlen ("Comment"));
+  keyvalue = g_hash_table_lookup (kf->current_keys, locale_compare_key);
+  g_free (locale_compare_key);
+
+  if (keyvalue && g_ascii_strcasecmp (value, keyvalue->value) == 0) {
+    print_warning (kf, "value \"%s\" for key \"%s\" in group \"%s\" "
+                       "looks redundant with value \"%s\" of key \"%s\"\n",
+                       value, locale_key, kf->current_group,
+                       keyvalue->value, keyvalue->key);
+    return FALSE;
+  }
+
   return TRUE;
 }
 
@@ -726,7 +1010,7 @@ handle_icon_key (kf_validator *kf,
       return TRUE;
   }
 
-  if (strchr (value, '/')) {
+  if (g_utf8_strchr (value, -1, G_DIR_SEPARATOR)) {
     print_fatal (kf, "value \"%s\" for key \"%s\" in group \"%s\" looks like "
                      "a relative path, instead of being an absolute path to "
                      "an icon or an icon name\n",
@@ -734,15 +1018,14 @@ handle_icon_key (kf_validator *kf,
     return FALSE;
   }
 
-  /* FIXME: in the future, we should make this fatal again */
   if (g_str_has_suffix (value, ".png") ||
       g_str_has_suffix (value, ".xpm") ||
       g_str_has_suffix (value, ".svg")) {
-    print_warning (kf, "value \"%s\" for key \"%s\" in group \"%s\" is an icon "
-                     "name with an extension, but there should be no extension "
-                     "as described in the Icon Theme Specification if the "
-                     "value is not an absolute path\n",
-                     value, locale_key, kf->current_group);
+    print_future_fatal (kf, "value \"%s\" for key \"%s\" in group \"%s\" is an icon "
+                        "name with an extension, but there should be no extension "
+                        "as described in the Icon Theme Specification if the "
+                        "value is not an absolute path\n",
+                        value, locale_key, kf->current_group);
     return FALSE;
   }
 
@@ -774,7 +1057,7 @@ handle_show_in_key (kf_validator *kf,
   retval = TRUE;
 
   if (kf->show_in) {
-    print_fatal (kf, "only one of \"OnlyShowIn\" and \"NotShowInkey\" keys "
+    print_fatal (kf, "only one of \"OnlyShowIn\" and \"NotShowIn\" keys "
                      "may appear in group \"%s\"\n",
                      kf->current_group);
     retval = FALSE;
@@ -810,7 +1093,7 @@ handle_show_in_key (kf_validator *kf,
     if (j == G_N_ELEMENTS (show_in_registered)) {
       print_fatal (kf, "value \"%s\" for key \"%s\" in group \"%s\" "
                        "contains an unregistered value \"%s\"; values "
-		       "extending the format should start with \"X-\"\n",
+                       "extending the format should start with \"X-\"\n",
                        value, locale_key, kf->current_group, show[i]);
       retval = FALSE;
     }
@@ -882,8 +1165,6 @@ handle_exec_key (kf_validator *kf,
   gboolean    escaped;
   gboolean    flag;
   const char *c;
-
-  handle_key_for_application (kf, locale_key, value);
 
   retval = TRUE;
 
@@ -1062,6 +1343,18 @@ handle_exec_key (kf_validator *kf,
   return retval;
 }
 
+/* See checks for handle_exec_key().
+ */
+static gboolean
+handle_desktop_exec_key (kf_validator *kf,
+                         const char   *locale_key,
+                         const char   *value)
+{
+  handle_key_for_application (kf, locale_key, value);
+
+  return handle_exec_key (kf, locale_key, value);
+}
+
 /* + If entry is of type Application, the working directory to run the program
  *   in. (probably implies an absolute path)
  *   Checked.
@@ -1085,8 +1378,6 @@ handle_path_key (kf_validator *kf,
 /* + The MIME type(s) supported by this application. Check they are valid
  *   MIME types.
  *   Checked.
- *   FIXME: need to verify what is the exact definition of a MIME type.
- *   Look at is_valid_mime_type()
  */
 static gboolean
 handle_mime_key (kf_validator *kf,
@@ -1095,9 +1386,10 @@ handle_mime_key (kf_validator *kf,
 {
   gboolean       retval;
   char         **types;
-  char          *slash;
   GHashTable    *hashtable;
   int            i;
+  char          *valid_error;
+  MimeUtilsValidity valid;
 
   handle_key_for_application (kf, locale_key, value);
 
@@ -1121,13 +1413,31 @@ handle_mime_key (kf_validator *kf,
 
     g_hash_table_insert (hashtable, types[i], types[i]);
 
-    slash = strchr (types[i], '/');
-    if (!slash || strchr (slash + 1, '/')) {
-      print_fatal (kf, "value \"%s\" for key \"%s\" in group \"%s\" "
-                       "contains value \"%s\" which does not look like "
-                       "a MIME type\n",
-                       value, locale_key, kf->current_group, types[i]);
-      retval = FALSE;
+    valid = mu_mime_type_is_valid (types[i], &valid_error);
+    switch (valid) {
+      case MU_VALID:
+        break;
+      case MU_DISCOURAGED:
+        print_warning (kf, "value \"%s\" for key \"%s\" in group \"%s\" "
+                           "contains value \"%s\" which is a MIME type that "
+                           "should probably not be used: %s\n",
+                           value, locale_key, kf->current_group,
+                           types[i], valid_error);
+
+        g_free (valid_error);
+        break;
+      case MU_INVALID:
+        print_future_fatal (kf, "value \"%s\" for key \"%s\" in group \"%s\" "
+                            "contains value \"%s\" which is an invalid MIME "
+                            "type: %s\n",
+                            value, locale_key, kf->current_group,
+                            types[i], valid_error);
+
+        retval = FALSE;
+        g_free (valid_error);
+        break;
+      default:
+        g_assert_not_reached ();
     }
   }
 
@@ -1152,6 +1462,13 @@ handle_mime_key (kf_validator *kf,
  *   FIXME: it's not really deprecated, so the error message is wrong
  * + All categories extending the format should start with "X-".
  *   Checked.
+ * + At least one main category must be included.
+ *   Checked.
+ *   FIXME: decide if it's okay to have an empty list of categories.
+ * + Some categories, if include, require that another category is included.
+ *   Eg: if Audio is there, AudioVideo must be there. Same for most additional
+ *   categories.
+ *   Checked.
  */
 static gboolean
 handle_categories_key (kf_validator *kf,
@@ -1163,14 +1480,23 @@ handle_categories_key (kf_validator *kf,
   GHashTable    *hashtable;
   int            i;
   unsigned int   j;
+  gboolean       main_category_present;
 
   handle_key_for_application (kf, locale_key, value);
 
   retval = TRUE;
 
+  /* accept empty value as valid: this is like having no category at all */
+  if (value[0] == '\0')
+    return retval;
+
   hashtable = g_hash_table_new_full (g_str_hash, g_str_equal, NULL, NULL);
   categories = g_strsplit (value, ";", 0);
 
+  /* this is a two-pass check: we first put the categories in a hash table so
+   * that they are easy-to-find, and we then do many checks */
+
+  /* first pass */
   for (i = 0; categories[i]; i++) {
     /* since the value ends with a semicolon, we'll have an empty string
      * at the end */
@@ -1185,22 +1511,48 @@ handle_categories_key (kf_validator *kf,
     }
 
     g_hash_table_insert (hashtable, categories[i], categories[i]);
+  }
+
+  /* second pass */
+  main_category_present = FALSE;
+
+  for (i = 0; categories[i]; i++) {
+    unsigned int k;
+
+    /* since the value ends with a semicolon, we'll have an empty string
+     * at the end */
+    if (*categories[i] == '\0' && categories[i + 1] == NULL)
+      break;
 
     if (!strncmp (categories[i], "X-", 2))
       continue;
 
-#define IF_CHECK_REGISTERED_CATEGORIES(table) \
-    for (j = 0; j < G_N_ELEMENTS (table); j++) { \
-      if (!strcmp (categories[i], table[j]))     \
-        break;                                   \
-    }                                            \
-    if (j != G_N_ELEMENTS (table))
+    for (j = 0; j < G_N_ELEMENTS (registered_categories); j++) {
+      if (!strcmp (categories[i], registered_categories[j].name))
+        break;
+    }
 
-    IF_CHECK_REGISTERED_CATEGORIES (main_categories_registered)
+    if (j == G_N_ELEMENTS (registered_categories)) {
+      print_fatal (kf, "value \"%s\" for key \"%s\" in group \"%s\" "
+                       "contains an unregistered value \"%s\"; values "
+                       "extending the format should start with \"X-\"\n",
+                       value, locale_key, kf->current_group, categories[i]);
+      retval = FALSE;
       continue;
-    IF_CHECK_REGISTERED_CATEGORIES (additional_categories_registered)
-      continue;
-    IF_CHECK_REGISTERED_CATEGORIES (reserved_categories_registered) {
+    }
+
+    if (registered_categories[j].main)
+      main_category_present = TRUE;
+
+    if (registered_categories[j].deprecated) {
+      if (!kf->no_deprecated_warnings)
+        print_warning (kf, "value \"%s\" for key \"%s\" in group \"%s\" "
+                           "contains a deprecated value \"%s\"\n",
+                            value, locale_key, kf->current_group,
+                            categories[i]);
+    }
+
+    if (registered_categories[j].require_only_show_in) {
       if (!g_hash_table_lookup (kf->current_keys, "OnlyShowIn")) {
         print_fatal (kf, "value \"%s\" in key \"%s\" in group \"%s\" "
                          "is a reserved category, so a \"OnlyShowIn\" key "
@@ -1208,35 +1560,69 @@ handle_categories_key (kf_validator *kf,
                          categories[i], locale_key, kf->current_group);
         retval = FALSE;
       }
-      continue;
-    }
-    IF_CHECK_REGISTERED_CATEGORIES (deprecated_categories_registered) {
-      if (!kf->no_deprecated_warnings)
-        print_warning (kf, "value \"%s\" for key \"%s\" in group \"%s\" "
-                           "contains a deprecated value \"%s\"\n",
-                            value, locale_key, kf->current_group,
-                            categories[i]);
-      continue;
     }
 
-    print_fatal (kf, "value \"%s\" for key \"%s\" in group \"%s\" "
-                     "contains an unregistered value \"%s\"; values "
-		     "extending the format should start with \"X-\"\n",
-                     value, locale_key, kf->current_group, categories[i]);
-    retval = FALSE;
+    for (k = 0; registered_categories[j].requires[k] != NULL; k++) {
+      char **required_categories;
+      int    l;
+
+      required_categories = g_strsplit (registered_categories[j].requires[k],
+                                        ";", 0);
+
+      for (l = 0; required_categories[l]; l++) {
+        if (!g_hash_table_lookup (hashtable, required_categories[l]))
+          break;
+      }
+
+      /* we've reached the end of a list of required categories, so
+       * the condition is satisfied */
+      if (required_categories[l] == NULL) {
+        g_strfreev (required_categories);
+        break;
+      }
+
+      g_strfreev (required_categories);
+    }
+
+    /* there was a required category and it wasn't found */
+    if (k != 0 && registered_categories[j].requires[k] == NULL) {
+      GString *output_required;
+
+      output_required = g_string_new (registered_categories[j].requires[0]);
+      for (k = 1; registered_categories[j].requires[k] != NULL; k++)
+        g_string_append_printf (output_required, ", or %s",
+                                registered_categories[j].requires[k]);
+
+      print_future_fatal (kf, "value \"%s\" in key \"%s\" in group \"%s\" "
+                          "requires another category to be present among the "
+                          "following categories: %s\n",
+                          categories[i], locale_key, kf->current_group,
+                          output_required->str);
+
+      g_string_free (output_required, TRUE);
+      retval = FALSE;
+    }
+
   }
 
   g_strfreev (categories);
   g_hash_table_destroy (hashtable);
 
+  if (!main_category_present) {
+    print_future_fatal (kf, "value \"%s\" for key \"%s\" in group \"%s\" "
+                        "does not contain a registered main category\n",
+                        value, locale_key, kf->current_group, categories[i]);
+    retval = FALSE;
+  }
+
   return retval;
 }
 
-/* FIXME: we don't know the format for this, so we'll just assume that it's
- * always valid...
- * This could be wrong because we could use the characters that are
- * valid for a group name. And also, since it's strings, it should be only
- * characters accepted for string values.
+/* + Identifiers for application actions. Check they are using a valid format.
+ *   Checked.
+ *
+ * Note that we will check later on (in * validate_actions()) that there is a
+ * "Desktop Action foobar" group for each "foobar" identifier.
  */
 static gboolean
 handle_actions_key (kf_validator *kf,
@@ -1246,17 +1632,25 @@ handle_actions_key (kf_validator *kf,
   char **actions;
   char  *action;
   int    i;
+  gboolean retval;
 
+  handle_key_for_application (kf, locale_key, value);
+
+  retval = TRUE;
   actions = g_strsplit (value, ";", 0);
 
   for (i = 0; actions[i]; i++) {
     /* since the value ends with a semicolon, we'll have an empty string
      * at the end */
     if (*actions[i] == '\0') {
-      if (actions[i + 1] != NULL)
-        print_warning (kf, "value \"%s\" for key \"%s\" in group \"%s\" "
-                           "contains an empty action\n",
-                           value, locale_key, kf->current_group);
+      if (actions[i + 1] != NULL) {
+        print_fatal (kf, "value \"%s\" for key \"%s\" in group \"%s\" "
+                         "contains an empty action\n",
+                         value, locale_key, kf->current_group);
+        retval = FALSE;
+        break;
+      }
+
       continue;
     }
 
@@ -1267,13 +1661,22 @@ handle_actions_key (kf_validator *kf,
       continue;
     }
 
+    if (!key_is_valid (actions[i], strlen (actions[i]))) {
+      print_fatal (kf, "value \"%s\" for key \"%s\" in group \"%s\" "
+                       "contains invalid action identifier \"%s\", only "
+                       "alphanumeric characters and '-' are allowed\n",
+                       value, locale_key, kf->current_group, actions[i]);
+      retval = FALSE;
+      break;
+    }
+
     action = g_strdup (actions[i]);
     g_hash_table_insert (kf->action_values, action, action);
   }
 
   g_strfreev (actions);
 
-  return TRUE;
+  return retval;
 }
 
 /* + The device to mount. (probably implies an absolute path)
@@ -1332,6 +1735,103 @@ handle_encoding_key (kf_validator *kf,
   return FALSE;
 }
 
+/* + See http://lists.freedesktop.org/archives/xdg/2007-January/007436.html
+ * + Value is one of:
+ *   - if-exists FILE
+ *   - unless-exists FILE
+ *   - DESKTOP-ENVIRONMENT-NAME [DESKTOP-SPECIFIC-TEST]
+ *   Checked.
+ * + FILE must be a path to a filename, relative to $XDG_CONFIG_HOME.
+ *   Checked.
+ * + DESKTOP-ENVIRONMENT-NAME should be a registered value (in Desktop Menu
+ *   Specification) or start with "X-".
+ *   Checked.
+ * + [DESKTOP-SPECIFIC-TEST] is optional.
+ *   Checked.
+ */
+static gboolean
+handle_autostart_condition_key (kf_validator *kf,
+                                const char   *locale_key,
+                                const char   *value)
+{
+  gboolean  retval;
+  char     *condition;
+  char     *argument;
+
+  handle_key_for_application (kf, locale_key, value);
+
+  retval = TRUE;
+
+  condition = g_strdup (value);
+  argument = g_utf8_strchr (condition, -1, ' ');
+
+  if (argument) {
+    /* make condition a 0-ended string */
+    *argument = '\0';
+
+    /* skip the space(s) */
+    argument++;
+    while (*argument == ' ') {
+      argument++;
+    }
+  }
+
+  if (!strcmp (condition, "if-exists") || !strcmp (condition, "unless-exists")) {
+    if (!argument || argument[0] == '\0') {
+      print_fatal (kf, "value \"%s\" for key \"%s\" in group \"%s\" "
+                       "does not contain a path to a file to test the "
+                       "condition\n",
+                       value, locale_key, kf->current_group);
+      retval = FALSE;
+    } else if (argument[0] == G_DIR_SEPARATOR) {
+      print_fatal (kf, "value \"%s\" for key \"%s\" in group \"%s\" "
+                       "contains a path \"%s\" that is absolute, while it "
+                       "should be relative (to $XDG_CONFIG_HOME)\n",
+                       value, locale_key, kf->current_group, argument);
+      retval = FALSE;
+    } else if (argument[0] == '.' &&
+               ((strlen (argument) == 2 &&
+                 argument[1] == '.') ||
+                (strlen (argument) >= 3 &&
+                 argument[1] == '.' &&
+                 argument[2] == G_DIR_SEPARATOR))) {
+      print_warning (kf, "value \"%s\" for key \"%s\" in group \"%s\" "
+                         "contains a path \"%s\" that depends on the value "
+                         "of $XDG_CONFIG_HOME (\"..\" should be avoided)\n",
+                         value, locale_key, kf->current_group, argument);
+    }
+
+  } else {
+    if (strncmp (condition, "X-", 2)) {
+      unsigned int i;
+
+      for (i = 0; i < G_N_ELEMENTS (show_in_registered); i++) {
+        if (!strcmp (condition, show_in_registered[i]))
+          break;
+      }
+
+      if (i == G_N_ELEMENTS (show_in_registered)) {
+        print_fatal (kf, "value \"%s\" for key \"%s\" in group \"%s\" "
+                         "contains an unregistered value \"%s\" for the "
+                         "condition; values extending the format should "
+                         "start with \"X-\"\n",
+                         value, locale_key, kf->current_group, condition);
+        retval = FALSE;
+      }
+    }
+
+    if (argument && argument[0] == '\0') {
+      print_warning (kf, "value \"%s\" for key \"%s\" in group \"%s\" "
+                         "has trailing space(s)\n",
+                         value, locale_key, kf->current_group);
+    }
+  }
+
+  g_free (condition);
+
+  return retval;
+}
+
 static gboolean
 handle_key_for_application (kf_validator *kf,
                             const char   *locale_key,
@@ -1373,7 +1873,7 @@ handle_key_for_mimetype (kf_validator *kf,
 }
 
 /* + Key names must contain only the characters A-Za-z0-9-.
- *   Checked.
+ *   Checked (through key_is_valid()).
  * + LOCALE must be of the form lang_COUNTRY.ENCODING@MODIFIER, where _COUNTRY,
  *   .ENCODING, and @MODIFIER  may be omitted.
  *   Checked.
@@ -1400,11 +1900,8 @@ key_extract_locale (const char  *key,
   else
     len = strlen (key);
 
-  for (i = 0; i < len; i++) {
-    c = key[i];
-    if (!g_ascii_isalnum (c) && c != '-')
-      return FALSE;
-  }
+  if (!key_is_valid(key, len))
+    return FALSE;
 
   if (!start_locale) {
     if (real_key)
@@ -1438,11 +1935,13 @@ key_extract_locale (const char  *key,
  *   Checked.
  */
 static gboolean
-validate_desktop_key (kf_validator *kf,
-                      const char   *locale_key,
-                      const char   *key,
-                      const char   *locale,
-                      const char   *value)
+validate_known_key (kf_validator         *kf,
+                    const char           *locale_key,
+                    const char           *key,
+                    const char           *locale,
+                    const char           *value,
+                    DesktopKeyDefinition *keys,
+                    unsigned int          n_keys)
 {
   unsigned int i;
   unsigned int j;
@@ -1450,11 +1949,12 @@ validate_desktop_key (kf_validator *kf,
   if (!strncmp (key, "X-", 2))
     return TRUE;
 
-  for (i = 0; i < G_N_ELEMENTS (registered_desktop_keys); i++) {
-    if (strcmp (key, registered_desktop_keys[i].name))
+  for (i = 0; i < n_keys; i++) {
+    if (strcmp (key, keys[i].name))
       continue;
 
-    if (registered_desktop_keys[i].type != DESKTOP_LOCALESTRING_TYPE &&
+    if (keys[i].type != DESKTOP_LOCALESTRING_TYPE &&
+        keys[i].type != DESKTOP_LOCALESTRING_LIST_TYPE &&
         locale != NULL) {
       print_fatal (kf, "file contains key \"%s\" in group \"%s\", "
                        "but \"%s\" is not defined as a locale string\n",
@@ -1463,17 +1963,17 @@ validate_desktop_key (kf_validator *kf,
     }
 
     for (j = 0; j < G_N_ELEMENTS (validate_for_type); j++) {
-      if (validate_for_type[j].type == registered_desktop_keys[i].type)
+      if (validate_for_type[j].type == keys[i].type)
         break;
     }
 
     g_assert (j != G_N_ELEMENTS (validate_for_type));
 
-    if (!kf->no_deprecated_warnings && registered_desktop_keys[i].deprecated)
+    if (!kf->no_deprecated_warnings && keys[i].deprecated)
       print_warning (kf, "key \"%s\" in group \"%s\" is deprecated\n",
                          locale_key, kf->current_group);
 
-    if (registered_desktop_keys[i].kde_reserved && kf->kde_reserved_warnings)
+    if (keys[i].kde_reserved && kf->kde_reserved_warnings)
       print_warning (kf, "key \"%s\" in group \"%s\" is a reserved key for "
                          "KDE\n",
                          locale_key, kf->current_group);
@@ -1481,16 +1981,15 @@ validate_desktop_key (kf_validator *kf,
     if (!validate_for_type[j].validate (kf, key, locale, value))
       return FALSE;
 
-    if (registered_desktop_keys[i].handle_and_validate != NULL) {
-      if (!registered_desktop_keys[i].handle_and_validate (kf, locale_key,
-                                                           value))
+    if (keys[i].handle_and_validate != NULL) {
+      if (!keys[i].handle_and_validate (kf, locale_key, value))
         return FALSE;
     }
 
     break;
   }
 
-  if (i == G_N_ELEMENTS (registered_desktop_keys)) {
+  if (i == n_keys) {
     print_fatal (kf, "file contains key \"%s\" in group \"%s\", but "
                      "keys extending the format should start with "
                      "\"X-\"\n", key, kf->current_group);
@@ -1500,6 +1999,30 @@ validate_desktop_key (kf_validator *kf,
   return TRUE;
 }
 
+static gboolean
+validate_desktop_key (kf_validator *kf,
+                      const char   *locale_key,
+                      const char   *key,
+                      const char   *locale,
+                      const char   *value)
+{
+  return validate_known_key (kf, locale_key, key, locale, value,
+                             registered_desktop_keys,
+                             G_N_ELEMENTS (registered_desktop_keys));
+}
+
+static gboolean
+validate_action_key (kf_validator *kf,
+                     const char   *locale_key,
+                     const char   *key,
+                     const char   *locale,
+                     const char   *value)
+{
+  return validate_known_key (kf, locale_key, key, locale, value,
+                             registered_action_keys,
+                             G_N_ELEMENTS (registered_action_keys));
+}
+
 /* + Multiple keys in the same group may not have the same name.
  *   Checked.
  */
@@ -1507,16 +2030,21 @@ static gboolean
 validate_keys_for_current_group (kf_validator *kf)
 {
   gboolean     desktop_group;
+  gboolean     action_group;
   gboolean     retval;
+  GHashTable  *duplicated_keys_hash;
   char        *key;
   char        *locale;
   GSList      *keys;
   GSList      *sl;
+  gpointer     hashvalue;
 
   retval = TRUE;
 
   desktop_group = (!strcmp (kf->current_group, GROUP_DESKTOP_ENTRY) ||
                    !strcmp (kf->current_group, GROUP_KDE_DESKTOP_ENTRY));
+  action_group = (!strncmp (kf->current_group, GROUP_DESKTOP_ACTION,
+                            strlen (GROUP_DESKTOP_ACTION)));
 
   keys = g_slist_copy (g_hash_table_lookup (kf->groups, kf->current_group));
   /* keys were prepended, so reverse the list (that's why we use a
@@ -1525,6 +2053,8 @@ validate_keys_for_current_group (kf_validator *kf)
 
   kf->current_keys = g_hash_table_new_full (g_str_hash, g_str_equal,
                                             NULL, NULL);
+  duplicated_keys_hash = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                                NULL, NULL);
 
   /* we need two passes: some checks are looking if another key exists in the
    * group */
@@ -1532,13 +2062,23 @@ validate_keys_for_current_group (kf_validator *kf)
     kf_keyvalue *keyvalue;
 
     keyvalue = (kf_keyvalue *) sl->data;
-    g_hash_table_insert (kf->current_keys, keyvalue->key, GINT_TO_POINTER (1));
+    g_hash_table_insert (kf->current_keys, keyvalue->key, keyvalue);
+
+    /* we could display the error about duplicate keys here, but it's better
+     * to display it with the first occurence of this key */
+    hashvalue = g_hash_table_lookup (duplicated_keys_hash, keyvalue->key);
+    if (!hashvalue)
+      g_hash_table_insert (duplicated_keys_hash, keyvalue->key,
+                           GINT_TO_POINTER (1));
+    else {
+      g_hash_table_replace (duplicated_keys_hash, keyvalue->key,
+                            GINT_TO_POINTER (GPOINTER_TO_INT (hashvalue) + 1));
+    }
   }
 
   for (sl = keys; sl != NULL; sl = sl->next) {
     kf_keyvalue *keyvalue;
     gboolean     skip_desktop_check;
-    gpointer     hashvalue;
 
     keyvalue = (kf_keyvalue *) sl->data;
 
@@ -1557,19 +2097,21 @@ validate_keys_for_current_group (kf_validator *kf)
 
     g_assert (key != NULL);
 
-    hashvalue = g_hash_table_lookup (kf->current_keys, keyvalue->key);
-    if (GPOINTER_TO_INT (hashvalue) != 1) {
+    hashvalue = g_hash_table_lookup (duplicated_keys_hash, keyvalue->key);
+    if (GPOINTER_TO_INT (hashvalue) > 1) {
+      g_hash_table_remove (duplicated_keys_hash, keyvalue->key);
       print_fatal (kf, "file contains multiple keys named \"%s\" in "
                        "group \"%s\"\n", keyvalue->key, kf->current_group);
       retval = FALSE;
-    } else {
-      g_hash_table_replace (kf->current_keys, keyvalue->key,
-                            GINT_TO_POINTER (2));
     }
 
     if (desktop_group && !skip_desktop_check) {
       if (!validate_desktop_key (kf, keyvalue->key,
                                  key, locale, keyvalue->value))
+        retval = FALSE;
+    } else if (action_group && !skip_desktop_check) {
+      if (!validate_action_key (kf, keyvalue->key,
+                                key, locale, keyvalue->value))
         retval = FALSE;
     }
 
@@ -1579,8 +2121,13 @@ validate_keys_for_current_group (kf_validator *kf)
     locale = NULL;
   }
 
+  g_slist_free (keys);
+  g_hash_table_destroy (duplicated_keys_hash);
   g_hash_table_destroy (kf->current_keys);
   kf->current_keys = NULL;
+  /* Clear ShowIn flag, so that different groups can each have a OnlyShowIn /
+   * NotShowIn key */
+  kf->show_in = FALSE;
 
   return retval;
 }
@@ -1593,10 +2140,12 @@ validate_keys_for_current_group (kf_validator *kf)
  *   Checked.
  * + All groups extending the format should start with "X-".
  *   Checked.
- * + Accept "Desktop Action foobar" group if the value for the Action key
- *   contains "foobar". (This is not in spec 1.0, but it was there before and
- *   it wasn't deprecated)
+ * + Accept "Desktop Action foobar" group, where foobar is a valid key
+ *   name.
  *   Checked.
+ *
+ * Note that for "Desktop Action foobar" group, we will check later on (in
+ * validate_actions()) that the Actions key contains "foobar".
  */
 static gboolean
 validate_group_name (kf_validator *kf,
@@ -1653,6 +2202,15 @@ validate_group_name (kf_validator *kf,
       char *action;
 
       action = g_strdup (group + strlen (GROUP_DESKTOP_ACTION));
+
+      if (!key_is_valid (action, strlen (action))) {
+        print_fatal (kf, "file contains group \"%s\", which has an invalid "
+                         "action identifier, only alphanumeric characters and "
+                         "'-' are allowed\n", group);
+        g_free (action);
+        return FALSE;
+      }
+
       g_hash_table_insert (kf->action_groups, action, action);
 
       return TRUE;
@@ -1665,7 +2223,10 @@ validate_group_name (kf_validator *kf,
 }
 
 static gboolean
-validate_required_keys (kf_validator *kf)
+validate_required_keys (kf_validator         *kf,
+                        const char           *group_name,
+                        DesktopKeyDefinition *key_definitions,
+                        unsigned int          n_keys)
 {
   gboolean      retval;
   unsigned int  i;
@@ -1676,7 +2237,7 @@ validate_required_keys (kf_validator *kf)
   retval = TRUE;
 
   hashtable = g_hash_table_new_full (g_str_hash, g_str_equal, NULL, NULL);
-  keys = g_hash_table_lookup (kf->groups, kf->main_group);
+  keys = g_hash_table_lookup (kf->groups, group_name);
 
   for (sl = keys; sl != NULL; sl = sl->next) {
     kf_keyvalue *keyvalue;
@@ -1685,13 +2246,13 @@ validate_required_keys (kf_validator *kf)
     g_hash_table_insert (hashtable, keyvalue->key, keyvalue->key);
   }
 
-  for (i = 0; i < G_N_ELEMENTS (registered_desktop_keys); i++) {
-    if (registered_desktop_keys[i].required) {
+  for (i = 0; i < n_keys; i++) {
+    if (key_definitions[i].required) {
       if (!g_hash_table_lookup (hashtable,
-                                registered_desktop_keys[i].name)) {
+                                key_definitions[i].name)) {
         print_fatal (kf, "required key \"%s\" in group \"%s\" is not "
                          "present\n",
-                         registered_desktop_keys[i].name, kf->main_group);
+                         key_definitions[i].name, group_name);
         retval = FALSE;
       }
     }
@@ -1700,6 +2261,14 @@ validate_required_keys (kf_validator *kf)
   g_hash_table_destroy (hashtable);
 
   return retval;
+}
+
+static gboolean
+validate_required_desktop_keys (kf_validator *kf)
+{
+  return validate_required_keys (kf, kf->main_group,
+                                 registered_desktop_keys,
+                                 G_N_ELEMENTS (registered_desktop_keys));
 }
 
 #define PRINT_ERROR_FOREACH_KEY(lower, real)                                 \
@@ -1800,6 +2369,14 @@ lookup_group_foreach_action (char         *key,
                              kf_validator *kf)
 {
   if (g_hash_table_lookup (kf->action_groups, key)) {
+    gchar *group_name;
+
+    group_name = g_strconcat (GROUP_DESKTOP_ACTION, key, NULL);
+    validate_required_keys (kf, group_name,
+                            registered_action_keys,
+                            G_N_ELEMENTS (registered_action_keys));
+    g_free (group_name);
+
     g_hash_table_remove (kf->action_groups, key);
     return TRUE;
   }
@@ -2071,7 +2648,7 @@ validate_parse_data (kf_validator *kf,
           kf->cr_error = TRUE;
         }
       }
-          
+
       if (kf->parse_buffer->len > 0) {
         validate_parse_line (kf);
         g_string_erase (kf->parse_buffer, 0, -1);
@@ -2237,7 +2814,7 @@ desktop_file_validate (const char *filename,
   //FIXME: this does not work well if there are both a Desktop Entry and a KDE
   //Desktop Entry groups since only the last one will be validated for this.
   if (kf.main_group) {
-    validate_required_keys (&kf);
+    validate_required_desktop_keys (&kf);
     validate_type_keys (&kf);
   }
   validate_actions (&kf);
@@ -2267,50 +2844,75 @@ desktop_file_validate (const char *filename,
   return (!kf.fatal_error);
 }
 
+static void
+fixup_list (GKeyFile    *keyfile,
+            const gchar *filename,
+            const gchar *key)
+{
+  char *value;
+  int   len;
+
+  value = g_key_file_get_value (keyfile, GROUP_DESKTOP_ENTRY, key, NULL);
+  if (!value)
+    return;
+
+  len = strlen (value);
+
+  if (len > 0 && (value[len - 1] != ';' ||
+                  (len > 1 && value[len - 2] == '\\' &&
+                  (len < 3 || value[len - 3] != '\\')))) {
+    char *str;
+
+    g_printerr ("%s: warning: key \"%s\" is a list and does not have a "
+                "semicolon as trailing character, fixing\n",
+                filename, key);
+
+    str = g_strconcat (value, ";", NULL);
+    g_key_file_set_value (keyfile, GROUP_DESKTOP_ENTRY,
+                          key, str);
+    g_free (str);
+  }
+}
+
 /* return FALSE if we were unable to fix the file */
 gboolean
 desktop_file_fixup (GKeyFile   *keyfile,
                     const char *filename)
 {
-  char         *value;
-  unsigned int  i;
-  
+  gchar        **keys;
+  gsize          keys_nb;
+  unsigned int   i;
+
   if (g_key_file_has_group (keyfile, GROUP_KDE_DESKTOP_ENTRY)) {
-    g_printerr ("%s: renaming deprecated \"%s\" group to \"%s\"\n",
+    g_printerr ("%s: warning: renaming deprecated \"%s\" group to \"%s\"\n",
                 filename, GROUP_KDE_DESKTOP_ENTRY, GROUP_DESKTOP_ENTRY);
     dfu_key_file_rename_group (keyfile,
                                GROUP_KDE_DESKTOP_ENTRY, GROUP_DESKTOP_ENTRY);
   }
-  
+
+  keys = g_key_file_get_keys (keyfile, GROUP_DESKTOP_ENTRY, &keys_nb, NULL);
+
   /* Fix lists to have a ';' at the end if they don't */
   for (i = 0; i < G_N_ELEMENTS (registered_desktop_keys); i++) {
-    if (registered_desktop_keys[i].type != DESKTOP_STRING_LIST_TYPE &&
-        registered_desktop_keys[i].type != DESKTOP_REGEXP_LIST_TYPE)
-      continue;
+    if (registered_desktop_keys[i].type == DESKTOP_STRING_LIST_TYPE ||
+        registered_desktop_keys[i].type == DESKTOP_REGEXP_LIST_TYPE)
+      fixup_list (keyfile, filename, registered_desktop_keys[i].name);
 
-    value = g_key_file_get_value (keyfile, GROUP_DESKTOP_ENTRY,
-                                  registered_desktop_keys[i].name, NULL);
-    if (value) {
-      int len;
+    if (registered_desktop_keys[i].type == DESKTOP_LOCALESTRING_LIST_TYPE) {
+      gsize keylen;
+      guint j;
 
-      len = strlen (value);
-
-      if (len > 0 && (value[len - 1] != ';' ||
-                      (len > 1 && value[len - 2] == '\\' &&
-                       (len < 3 || value[len - 3] != '\\')))) {
-          char *str;
-
-          g_printerr ("%s: key \"%s\" is a list and does not have a "
-                      "semicolon as trailing character, fixing\n",
-                      filename, registered_desktop_keys[i].name);
-          
-          str = g_strconcat (value, ";", NULL);
-          g_key_file_set_value (keyfile, GROUP_DESKTOP_ENTRY,
-                                registered_desktop_keys[i].name, str);
-          g_free (str);
+      keylen = strlen (registered_desktop_keys[i].name);
+      for (j = 0; j < keys_nb; j++) {
+        if (g_str_has_prefix (keys[j], registered_desktop_keys[i].name) &&
+            (keys[j][keylen] == '[' || keys[j][keylen] == '\0')) {
+          fixup_list (keyfile, filename, keys[j]);
+        }
       }
     }
   }
+
+  g_strfreev (keys);
 
   return TRUE;
 }

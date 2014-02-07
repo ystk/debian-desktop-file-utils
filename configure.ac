@@ -1,19 +1,14 @@
-AC_INIT([desktop-file-utils], [0.15],
+AC_INIT([desktop-file-utils], [0.20],
         [https://bugs.freedesktop.org/enter_bug.cgi?product=desktop-file-utils])
 AC_CONFIG_SRCDIR(src/validate.h)
 
-AM_INIT_AUTOMAKE
+AM_INIT_AUTOMAKE([1.11 foreign no-dist-gzip dist-xz tar-ustar])
+m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
+AC_CONFIG_MACRO_DIR([m4])
 AM_CONFIG_HEADER(config.h)
 
-# Honor aclocal flags
-AC_SUBST(ACLOCAL_AMFLAGS, "\${ACLOCAL_FLAGS}")
-
-AM_MAINTAINER_MODE
-
+AC_PROG_LN_S
 AC_PROG_CC
-AC_ISC_POSIX
-AC_HEADER_STDC
-AM_PROG_LIBTOOL
 
 if test "x$GCC" = "xyes"; then
   changequote(,)dnl
@@ -100,8 +95,9 @@ AM_PATH_LISPDIR
 
 AC_CONFIG_FILES([
 Makefile
-src/Makefile
+man/Makefile
 misc/Makefile
+src/Makefile
 ])
 
 AC_OUTPUT

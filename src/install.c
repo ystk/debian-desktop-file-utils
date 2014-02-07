@@ -1,3 +1,28 @@
+/* vim: set ts=2 sw=2 et: */
+
+/*
+ * Copyright (C) 2002, 2004  Red Hat, Inc.
+ * Copyright (C) 2006-2008  Vincent Untz
+ *
+ * Program written by Havoc Pennington <hp@pobox.com>
+ *                    Ray Strode <rstrode@redhat.com>
+ *                    Vincent Untz <vuntz@gnome.org>
+ *
+ * update-desktop-database is free software; you can redistribute it
+ * and/or modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation; either version 2 of the
+ * License, or (at your option) any later version.
+ *
+ * update-desktop-database is distributed in the hope that it will be
+ * useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with update-desktop-database; see the file COPYING.  If not,
+ * write to the Free Software Foundation, Inc., 59 Temple Place - Suite
+ * 330, Boston, MA 02111-1307, USA.
+ */
 
 #include <config.h>
 
@@ -14,21 +39,57 @@
 #include "keyfileutils.h"
 #include "validate.h"
 
+static gboolean edit_mode = FALSE;
 static const char** args = NULL;
 static gboolean delete_original = FALSE;
-static gboolean copy_generic_name_to_name = FALSE;
-static gboolean copy_name_to_generic_name = FALSE;
 static gboolean rebuild_mime_info_cache = FALSE;
 static char *vendor_name = NULL;
 static char *target_dir = NULL;
-static GSList *added_categories = NULL;
-static GSList *removed_categories = NULL;
-static GSList *added_only_show_in = NULL;
-static GSList *removed_only_show_in = NULL;
-static GSList *removed_keys = NULL;
-static GSList *added_mime_types = NULL;
-static GSList *removed_mime_types = NULL;
+static GSList *edit_actions = NULL;
 static mode_t permissions = 0644;
+
+typedef enum
+{
+  DFU_SET_KEY_BUILDING, /* temporary type to create an action in multiple steps */
+  DFU_SET_KEY,
+  DFU_REMOVE_KEY,
+  DFU_ADD_TO_LIST,
+  DFU_REMOVE_FROM_LIST,
+  DFU_COPY_KEY
+} DfuEditActionType;
+
+typedef struct
+{
+  DfuEditActionType  type;
+  char              *key;
+  char              *action_value;
+} DfuEditAction;
+
+static DfuEditAction *
+dfu_edit_action_new (DfuEditActionType  type,
+                     const char        *key,
+                     const char        *action_value)
+{
+  DfuEditAction *action;
+
+  action = g_slice_new0 (DfuEditAction);
+  action->type = type;
+  action->key = g_strdup (key);
+  action->action_value = g_strdup (action_value);
+
+  return action;
+}
+
+static void
+dfu_edit_action_free (DfuEditAction *action)
+{
+  g_assert (action != NULL);
+
+  g_free (action->key);
+  g_free (action->action_value);
+
+  g_slice_free (DfuEditAction, action);
+}
 
 static gboolean
 files_are_the_same (const char *first,
@@ -54,7 +115,7 @@ files_are_the_same (const char *first,
       g_printerr (_("Could not stat \"%s\": %s\n"), first, g_strerror (errno));
       return TRUE;
     }
-  
+
   return ((first_sb.st_dev == second_sb.st_dev) &&
           (first_sb.st_ino == second_sb.st_ino) &&
           /* Broken paranoia in case an OS doesn't use inodes or something */
@@ -76,7 +137,7 @@ rebuild_cache (const char  *dir,
   retval = g_spawn_sync (NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL,
                          NULL, NULL, &exit_status, &spawn_error);
 
-  if (spawn_error != NULL) 
+  if (spawn_error != NULL)
     {
       g_propagate_error (err, spawn_error);
       return FALSE;
@@ -90,17 +151,15 @@ process_one_file (const char *filename,
                   GError    **err)
 {
   char *new_filename;
-  char *dirname;
-  char *basename;
   GKeyFile *kf = NULL;
   GError *rebuild_error;
   GSList *tmp;
-  
+
   kf = g_key_file_new ();
   if (!g_key_file_load_from_file (kf, filename,
-			          G_KEY_FILE_KEEP_COMMENTS|
-				  G_KEY_FILE_KEEP_TRANSLATIONS,
-				  err)) {
+                                  G_KEY_FILE_KEEP_COMMENTS|
+                                  G_KEY_FILE_KEEP_TRANSLATIONS,
+                                  err)) {
     g_key_file_free (kf);
     return;
   }
@@ -112,14 +171,6 @@ process_one_file (const char *filename,
     return;
   }
 
-  if (copy_name_to_generic_name)
-    dfu_key_file_copy_key (kf, GROUP_DESKTOP_ENTRY, "Name",
-                               GROUP_DESKTOP_ENTRY, "GenericName");
-
-  if (copy_generic_name_to_name)
-    dfu_key_file_copy_key (kf, GROUP_DESKTOP_ENTRY, "GenericName",
-                               GROUP_DESKTOP_ENTRY, "Name");
-  
   /* Mark file as having been processed by us, so automated
    * tools can check that desktop files went through our
    * munging
@@ -127,68 +178,73 @@ process_one_file (const char *filename,
   g_key_file_set_string (kf, GROUP_DESKTOP_ENTRY,
                          "X-Desktop-File-Install-Version", VERSION);
 
-#define PROCESS_LIST(key, added, removed)                       \
-  /* Add to the list */                                         \
-  tmp = added;                                                  \
-  while (tmp != NULL)                                           \
-    {                                                           \
-      dfu_key_file_merge_list (kf, GROUP_DESKTOP_ENTRY,         \
-                               key, tmp->data);                 \
-      tmp = tmp->next;                                          \
-    }                                                           \
-                                                                \
-  /* Remove from the list */                                    \
-  tmp = removed;                                                \
-  while (tmp != NULL)                                           \
-    {                                                           \
-      dfu_key_file_remove_list (kf, GROUP_DESKTOP_ENTRY,        \
-                                key, tmp->data);                \
-      tmp = tmp->next;                                          \
-    }
-
-  /* Add/remove categories */
-  PROCESS_LIST ("Categories", added_categories, removed_categories);
-
-  /* Add/remove onlyshowin */
-  PROCESS_LIST ("OnlyShowIn", added_only_show_in, removed_only_show_in);
-
-  /* Remove keys */
-  tmp = removed_keys;
+  tmp = edit_actions;
   while (tmp != NULL)
     {
-      g_key_file_remove_key (kf, GROUP_DESKTOP_ENTRY, tmp->data, NULL);
+      DfuEditAction *action = tmp->data;
+
+      switch (action->type)
+        {
+          case DFU_SET_KEY:
+            g_key_file_set_string (kf, GROUP_DESKTOP_ENTRY,
+                                   action->key, action->action_value);
+            dfu_key_file_drop_locale_strings (kf, GROUP_DESKTOP_ENTRY,
+                                              action->key);
+            break;
+          case DFU_REMOVE_KEY:
+            g_key_file_remove_key (kf, GROUP_DESKTOP_ENTRY,
+                                   action->key, NULL);
+            dfu_key_file_drop_locale_strings (kf, GROUP_DESKTOP_ENTRY,
+                                              action->key);
+            break;
+          case DFU_ADD_TO_LIST:
+            dfu_key_file_merge_list (kf, GROUP_DESKTOP_ENTRY,
+                                     action->key, action->action_value);
+            break;
+          case DFU_REMOVE_FROM_LIST:
+            dfu_key_file_remove_list (kf, GROUP_DESKTOP_ENTRY,
+                                      action->key, action->action_value);
+            break;
+          case DFU_COPY_KEY:
+            dfu_key_file_copy_key (kf, GROUP_DESKTOP_ENTRY, action->key,
+                                   GROUP_DESKTOP_ENTRY, action->action_value);
+            break;
+          default:
+            g_assert_not_reached ();
+        }
 
       tmp = tmp->next;
     }
 
-  /* Add/remove mime-types */
-  PROCESS_LIST ("MimeType", added_mime_types, removed_mime_types);
-
-
-  dirname = g_path_get_dirname (filename);
-  basename = g_path_get_basename (filename);
-  
-  if (vendor_name && !g_str_has_prefix (basename, vendor_name))
+  if (edit_mode)
     {
-      char *new_base;
-      new_base = g_strconcat (vendor_name, "-", basename, NULL);
-      new_filename = g_build_filename (target_dir, new_base, NULL);
-      g_free (new_base);
+      new_filename = g_strdup (filename);
     }
   else
     {
-      new_filename = g_build_filename (target_dir, basename, NULL);
+      char *basename = g_path_get_basename (filename);
+
+      if (vendor_name && !g_str_has_prefix (basename, vendor_name))
+        {
+          char *new_base;
+          new_base = g_strconcat (vendor_name, "-", basename, NULL);
+          new_filename = g_build_filename (target_dir, new_base, NULL);
+          g_free (new_base);
+        }
+      else
+        {
+          new_filename = g_build_filename (target_dir, basename, NULL);
+        }
+
+      g_free (basename);
     }
 
-  g_free (dirname);
-  g_free (basename);
-  
-  if (!dfu_key_file_to_file (kf, new_filename, err)) {
+  if (!dfu_key_file_to_path (kf, new_filename, err)) {
     g_key_file_free (kf);
     g_free (new_filename);
     return;
   }
-  
+
   g_key_file_free (kf);
 
   /* Load and validate the file we just wrote */
@@ -196,29 +252,37 @@ process_one_file (const char *filename,
     {
       g_set_error (err, G_KEY_FILE_ERROR, G_KEY_FILE_ERROR_PARSE,
                    _("Failed to validate the created desktop file"));
-      g_unlink (new_filename);
+
+      if (!files_are_the_same (filename, new_filename))
+        g_unlink (new_filename);
+
       g_free (new_filename);
       return;
     }
 
-  if (g_chmod (new_filename, permissions) < 0)
+  if (!edit_mode)
     {
-      g_set_error (err, G_FILE_ERROR,
-                   g_file_error_from_errno (errno),
-                   _("Failed to set permissions %o on \"%s\": %s"),
-                   permissions, new_filename, g_strerror (errno));
+      if (g_chmod (new_filename, permissions) < 0)
+        {
+          g_set_error (err, G_FILE_ERROR,
+                       g_file_error_from_errno (errno),
+                       _("Failed to set permissions %o on \"%s\": %s"),
+                       permissions, new_filename, g_strerror (errno));
 
-      g_unlink (new_filename);
-      g_free (new_filename);
-      return;
-    }
+          if (!files_are_the_same (filename, new_filename))
+            g_unlink (new_filename);
 
-  if (delete_original &&
-      !files_are_the_same (filename, new_filename))
-    {
-      if (g_unlink (filename) < 0)
-        g_printerr (_("Error removing original file \"%s\": %s\n"),
-                    filename, g_strerror (errno));
+          g_free (new_filename);
+          return;
+        }
+
+      if (delete_original &&
+          !files_are_the_same (filename, new_filename))
+        {
+          if (g_unlink (filename) < 0)
+            g_printerr (_("Error removing original file \"%s\": %s\n"),
+                        filename, g_strerror (errno));
+        }
     }
 
   if (rebuild_mime_info_cache)
@@ -229,63 +293,38 @@ process_one_file (const char *filename,
       if (rebuild_error != NULL)
         g_propagate_error (err, rebuild_error);
     }
-  
+
   g_free (new_filename);
 }
 
-static gboolean parse_options_callback (const gchar  *option_name,
-                                        const gchar  *value,
-                                        gpointer      data,
-                                        GError      **error);
+static gboolean parse_install_options_callback (const gchar  *option_name,
+                                                const gchar  *value,
+                                                gpointer      data,
+                                                GError      **error);
+
+static gboolean parse_edit_options_callback (const gchar  *option_name,
+                                             const gchar  *value,
+                                             gpointer      data,
+                                             GError      **error);
 
 
-static const GOptionEntry options[] = {
-  {
-#define OPTION_VENDOR "vendor"
-    OPTION_VENDOR,
-    '\0',
-    '\0',
-    G_OPTION_ARG_CALLBACK,
-    parse_options_callback,
-    N_("Specify the vendor prefix to be applied to the desktop file. If the file already has this prefix, nothing happens."),
-    NULL
-  },
-  {
-#define OPTION_DIR "dir"
-    OPTION_DIR,
-    '\0',
-    '\0',
-    G_OPTION_ARG_CALLBACK,
-    parse_options_callback,
-    N_("Specify the directory where files should be installed."),
-    NULL
-  },
-  {
-    "delete-original",
-    '\0',
-    '\0',
-    G_OPTION_ARG_NONE,
-    &delete_original,
-    N_("Delete the source desktop file, leaving only the target file. Effectively \"renames\" a desktop file."),
-    NULL
-  },
-  {
-#define OPTION_MODE "mode"
-    OPTION_MODE,
-    'm',
-    '\0',
-    G_OPTION_ARG_CALLBACK,
-    parse_options_callback,
-    N_("Set the given permissions on the destination file."),
-    NULL
-  },
+static const GOptionEntry main_options[] = {
   {
     "rebuild-mime-info-cache",
     '\0',
     '\0',
     G_OPTION_ARG_NONE,
     &rebuild_mime_info_cache,
-    N_("After installing desktop file rebuild the mime-types application database."),
+    N_("Rebuild the MIME types application database after processing desktop files"),
+    NULL
+  },
+  {
+    "edit-mode",
+    '\0',
+    G_OPTION_FLAG_HIDDEN, /* just for development purpose */
+    G_OPTION_ARG_NONE,
+    &edit_mode,
+    N_("Force edit mode"),
     NULL
   },
   { G_OPTION_REMAINING,
@@ -300,15 +339,140 @@ static const GOptionEntry options[] = {
   }
 };
 
+static const GOptionEntry install_options[] = {
+  {
+#define OPTION_DIR "dir"
+    OPTION_DIR,
+    '\0',
+    '\0',
+    G_OPTION_ARG_CALLBACK,
+    parse_install_options_callback,
+    N_("Install desktop files to the DIR directory"),
+    N_("DIR")
+  },
+  {
+#define OPTION_MODE "mode"
+    OPTION_MODE,
+    'm',
+    '\0',
+    G_OPTION_ARG_CALLBACK,
+    parse_install_options_callback,
+    N_("Set the permissions of the destination files to MODE"),
+    N_("MODE")
+  },
+  {
+#define OPTION_VENDOR "vendor"
+    OPTION_VENDOR,
+    '\0',
+    '\0',
+    G_OPTION_ARG_CALLBACK,
+    parse_install_options_callback,
+    N_("Add a vendor prefix to the desktop files, if not already present"),
+    N_("VENDOR")
+  },
+  {
+    "delete-original",
+    '\0',
+    '\0',
+    G_OPTION_ARG_NONE,
+    &delete_original,
+    N_("Delete the source desktop files, leaving only the target files (effectively \"renames\" the desktop files)"),
+    NULL
+  },
+  {
+    NULL
+  }
+};
+
 static const GOptionEntry edit_options[] = {
+  {
+#define OPTION_SET_KEY "set-key"
+    OPTION_SET_KEY,
+    '\0',
+    '\0',
+    G_OPTION_ARG_CALLBACK,
+    parse_edit_options_callback,
+    N_("Set the KEY key to VALUE passed to next --set-value option"),
+    N_("KEY")
+  },
+  {
+#define OPTION_SET_VALUE "set-value"
+    OPTION_SET_VALUE,
+    '\0',
+    '\0',
+    G_OPTION_ARG_CALLBACK,
+    parse_edit_options_callback,
+    N_("Set the KEY key from previous --set-key option to VALUE"),
+    N_("VALUE")
+  },
+  {
+#define OPTION_SET_NAME "set-name"
+    OPTION_SET_NAME,
+    '\0',
+    '\0',
+    G_OPTION_ARG_CALLBACK,
+    parse_edit_options_callback,
+    N_("Set the \"Name\" key to NAME"),
+    N_("NAME")
+  },
+  {
+#define OPTION_COPY_GENERIC_NAME "copy-generic-name-to-name"
+    OPTION_COPY_GENERIC_NAME,
+    '\0',
+    G_OPTION_FLAG_NO_ARG,
+    G_OPTION_ARG_CALLBACK,
+    parse_edit_options_callback,
+    N_("Copy the value of the \"GenericName\" key to the \"Name\" key"),
+    NULL
+  },
+  {
+#define OPTION_SET_GENERIC_NAME "set-generic-name"
+    OPTION_SET_GENERIC_NAME,
+    '\0',
+    '\0',
+    G_OPTION_ARG_CALLBACK,
+    parse_edit_options_callback,
+    N_("Set the \"GenericName\" key to GENERIC-NAME"),
+    N_("GENERIC-NAME")
+  },
+  {
+#define OPTION_COPY_NAME "copy-name-to-generic-name"
+    OPTION_COPY_NAME,
+    '\0',
+    G_OPTION_FLAG_NO_ARG,
+    G_OPTION_ARG_CALLBACK,
+    parse_edit_options_callback,
+    N_("Copy the value of the \"Name\" key to the \"GenericName\" key"),
+    NULL
+  },
+  {
+#define OPTION_SET_COMMENT "set-comment"
+    OPTION_SET_COMMENT,
+    '\0',
+    '\0',
+    G_OPTION_ARG_CALLBACK,
+    parse_edit_options_callback,
+    N_("Set the \"Comment\" key to COMMENT"),
+    N_("COMMENT")
+  },
+  {
+#define OPTION_SET_ICON "set-icon"
+    OPTION_SET_ICON,
+    '\0',
+    '\0',
+    G_OPTION_ARG_CALLBACK,
+    parse_edit_options_callback,
+    N_("Set the \"Icon\" key to ICON"),
+    N_("ICON")
+  },
   {
 #define OPTION_ADD_CATEGORY "add-category"
     OPTION_ADD_CATEGORY,
     '\0',
     '\0',
     G_OPTION_ARG_CALLBACK,
-    parse_options_callback,
-    N_("Specify a category to be added to the Categories field."),
+    parse_edit_options_callback,
+    N_("Add CATEGORY to the list of categories"),
     N_("CATEGORY")
   },
   {
@@ -317,57 +481,9 @@ static const GOptionEntry edit_options[] = {
     '\0',
     '\0',
     G_OPTION_ARG_CALLBACK,
-    parse_options_callback,
-    N_("Specify a category to be removed from the Categories field."),
+    parse_edit_options_callback,
+    N_("Remove CATEGORY from the list of categories"),
     N_("CATEGORY")
-  },
-  {
-#define OPTION_ADD_ONLY_SHOW_IN "add-only-show-in"
-    OPTION_ADD_ONLY_SHOW_IN,
-    '\0',
-    '\0',
-    G_OPTION_ARG_CALLBACK,
-    parse_options_callback,
-    N_("Specify a product name to be added to the OnlyShowIn field."),
-    N_("PRODUCT")
-  },
-  {
-#define OPTION_REMOVE_ONLY_SHOW_IN "remove-only-show-in"
-    OPTION_REMOVE_ONLY_SHOW_IN,
-    '\0',
-    '\0',
-    G_OPTION_ARG_CALLBACK,
-    parse_options_callback,
-    N_("Specify a product name to be removed from the OnlyShowIn field."),
-    N_("PRODUCT")
-  },
-  {
-    "copy-name-to-generic-name",
-    '\0',
-    '\0',
-    G_OPTION_ARG_NONE,
-    &copy_name_to_generic_name,
-    N_("Copy the contents of the \"Name\" field to the \"GenericName\" field."),
-    NULL
-  },
-  {
-    "copy-generic-name-to-name",
-    '\0',
-    '\0',
-    G_OPTION_ARG_NONE,
-    &copy_generic_name_to_name,
-    N_("Copy the contents of the \"GenericName\" field to the \"Name\" field."),
-    NULL
-  },
-  {
-#define OPTION_REMOVE_KEY "remove-key"
-    OPTION_REMOVE_KEY,
-    '\0',
-    '\0',
-    G_OPTION_ARG_CALLBACK,
-    parse_options_callback,
-    N_("Specify a field to be removed from the desktop file."),
-    N_("KEY")
   },
   {
 #define OPTION_ADD_MIME_TYPE "add-mime-type"
@@ -375,8 +491,8 @@ static const GOptionEntry edit_options[] = {
     '\0',
     '\0',
     G_OPTION_ARG_CALLBACK,
-    parse_options_callback,
-    N_("Specify a mime-type to be added to the MimeType field."),
+    parse_edit_options_callback,
+    N_("Add MIME-TYPE to the list of MIME types"),
     N_("MIME-TYPE")
   },
   {
@@ -385,9 +501,59 @@ static const GOptionEntry edit_options[] = {
     '\0',
     '\0',
     G_OPTION_ARG_CALLBACK,
-    parse_options_callback,
-    N_("Specify a mime-type to be removed from the MimeType field."),
+    parse_edit_options_callback,
+    N_("Remove MIME-TYPE from the list of MIME types"),
     N_("MIME-TYPE")
+  },
+  {
+#define OPTION_ADD_ONLY_SHOW_IN "add-only-show-in"
+    OPTION_ADD_ONLY_SHOW_IN,
+    '\0',
+    '\0',
+    G_OPTION_ARG_CALLBACK,
+    parse_edit_options_callback,
+    N_("Add ENVIRONMENT to the list of desktop environment where the desktop files should be displayed"),
+    N_("ENVIRONMENT")
+  },
+  {
+#define OPTION_REMOVE_ONLY_SHOW_IN "remove-only-show-in"
+    OPTION_REMOVE_ONLY_SHOW_IN,
+    '\0',
+    '\0',
+    G_OPTION_ARG_CALLBACK,
+    parse_edit_options_callback,
+    N_("Remove ENVIRONMENT from the list of desktop environment where the desktop files should be displayed"),
+    N_("ENVIRONMENT")
+  },
+  {
+#define OPTION_ADD_NOT_SHOW_IN "add-not-show-in"
+    OPTION_ADD_NOT_SHOW_IN,
+    '\0',
+    '\0',
+    G_OPTION_ARG_CALLBACK,
+    parse_edit_options_callback,
+    N_("Add ENVIRONMENT to the list of desktop environment where the desktop files should not be displayed"),
+    N_("ENVIRONMENT")
+  },
+  {
+#define OPTION_REMOVE_NOT_SHOW_IN "remove-not-show-in"
+    OPTION_REMOVE_NOT_SHOW_IN,
+    '\0',
+    '\0',
+    G_OPTION_ARG_CALLBACK,
+    parse_edit_options_callback,
+    N_("Remove ENVIRONMENT from the list of desktop environment where the desktop files should not be displayed"),
+    N_("ENVIRONMENT")
+  },
+  {
+#define OPTION_REMOVE_KEY "remove-key"
+    OPTION_REMOVE_KEY,
+    '\0',
+    '\0',
+    G_OPTION_ARG_CALLBACK,
+    parse_edit_options_callback,
+    N_("Remove the KEY key from the desktop files, if present"),
+    N_("KEY")
   },
   {
     NULL
@@ -395,32 +561,17 @@ static const GOptionEntry edit_options[] = {
 };
 
 static gboolean
-parse_options_callback (const gchar  *option_name,
-                        const gchar  *value,
-                        gpointer      data,
-                        GError      **error)
+parse_install_options_callback (const gchar  *option_name,
+                                const gchar  *value,
+                                gpointer      data,
+                                GError      **error)
 {
-  char **list;
-  int    i;
-
   /* skip "-" or "--" */
   option_name++;
   if (*option_name == '-')
     option_name++;
 
-  if (strcmp (OPTION_VENDOR, option_name) == 0)
-    {
-      if (vendor_name)
-        {
-          g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_FAILED,
-                       _("Can only specify --vendor once"));
-          return FALSE;
-        }
-      
-      vendor_name = g_strdup (value);
-    }
-
-  else if (strcmp (OPTION_DIR, option_name) == 0)
+  if (strcmp (OPTION_DIR, option_name) == 0)
     {
       if (target_dir)
         {
@@ -432,44 +583,12 @@ parse_options_callback (const gchar  *option_name,
       target_dir = g_strdup (value);
     }
 
-#define PARSE_OPTION_LIST(glist)                                        \
-  do {                                                                  \
-    list = g_strsplit (value, ";", 0);                                  \
-    for (i = 0; list[i]; i++)                                           \
-      {                                                                 \
-        if (*list[i] == '\0')                                           \
-          continue;                                                     \
-                                                                        \
-        glist = g_slist_prepend (glist, g_strdup (list[i]));            \
-      }                                                                 \
-  } while (0)
-
-  else if (strcmp (OPTION_ADD_CATEGORY, option_name) == 0)
-    {
-      PARSE_OPTION_LIST (added_categories);
-    }
-
-  else if (strcmp (OPTION_REMOVE_CATEGORY, option_name) == 0)
-    {
-      PARSE_OPTION_LIST (removed_categories);
-    }
-
-  else if (strcmp (OPTION_ADD_ONLY_SHOW_IN, option_name) == 0)
-    {
-      PARSE_OPTION_LIST (added_only_show_in);
-    }
-
-  else if (strcmp (OPTION_REMOVE_ONLY_SHOW_IN, option_name) == 0)
-    {
-      PARSE_OPTION_LIST (removed_only_show_in);
-    }
-
   else if (strcmp (OPTION_MODE, option_name) == 0 ||
            strcmp ("m", option_name) == 0)
     {
       unsigned long ul;
       char *end;
-      
+
       end = NULL;
       ul = strtoul (value, &end, 8);
       if (*value && end && *end == '\0')
@@ -478,34 +597,231 @@ parse_options_callback (const gchar  *option_name,
         {
           g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_FAILED,
                        _("Could not parse mode string \"%s\""), value);
-          
+
           return FALSE;
         }
     }
 
-  else if (strcmp (OPTION_REMOVE_KEY, option_name) == 0)
+  else if (strcmp (OPTION_VENDOR, option_name) == 0)
     {
-      removed_keys = g_slist_prepend (removed_keys,
-                                      g_strdup (value));
-    }
+      if (vendor_name)
+        {
+          g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_FAILED,
+              _("Can only specify --vendor once"));
+          return FALSE;
+        }
 
-  else if (strcmp (OPTION_ADD_MIME_TYPE, option_name) == 0)
-    {
-      PARSE_OPTION_LIST (added_mime_types);
-    }
-
-  else if (strcmp (OPTION_REMOVE_MIME_TYPE, option_name) == 0)
-    {
-      PARSE_OPTION_LIST (removed_mime_types);
+      vendor_name = g_strdup (value);
     }
 
   else
     {
-        g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_FAILED,
-                     _("Unknown option \"%s\""), option_name);
-        
-        return FALSE;
+      g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_FAILED,
+                   _("Unknown option \"%s\""), option_name);
+
+      return FALSE;
     }
+
+  return TRUE;
+}
+
+static gboolean
+parse_edit_options_callback (const gchar  *option_name,
+                             const gchar  *value,
+                             gpointer      data,
+                             GError      **error)
+{
+  /* Note: we prepend actions to the list, so we'll need to reverse it later */
+
+  DfuEditAction  *action;
+  char          **list;
+  int             i;
+
+  /* skip "-" or "--" */
+  option_name++;
+  if (*option_name == '-')
+    option_name++;
+
+#define PARSE_OPTION_LIST(type, key)                                    \
+  do {                                                                  \
+    list = g_strsplit (value, ";", 0);                                  \
+    for (i = 0; list[i]; i++)                                           \
+      {                                                                 \
+        if (*list[i] == '\0')                                           \
+          continue;                                                     \
+                                                                        \
+        action = dfu_edit_action_new (type, key, list[i]);              \
+        edit_actions = g_slist_prepend (edit_actions, action);          \
+      }                                                                 \
+  } while (0)
+
+  if (strcmp (OPTION_SET_KEY, option_name) == 0)
+    {
+      action = dfu_edit_action_new (DFU_SET_KEY_BUILDING, value, NULL);
+      edit_actions = g_slist_prepend (edit_actions, action);
+    }
+
+  else if (strcmp (OPTION_SET_VALUE, option_name) == 0)
+    {
+      gboolean handled = FALSE;
+
+      if (edit_actions != NULL)
+        {
+          action = edit_actions->data;
+          if (action->type == DFU_SET_KEY_BUILDING)
+            {
+              action->type = DFU_SET_KEY;
+              action->action_value = g_strdup (value);
+
+              handled = TRUE;
+            }
+        }
+
+      if (!handled)
+        {
+          g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_FAILED,
+                       _("Option \"--%s\" used without a prior \"--%s\" option"),
+                       OPTION_SET_VALUE, OPTION_SET_KEY);
+
+          return FALSE;
+        }
+    }
+
+  else if (strcmp (OPTION_SET_NAME, option_name) == 0)
+    {
+      action = dfu_edit_action_new (DFU_SET_KEY, "Name", value);
+      edit_actions = g_slist_prepend (edit_actions, action);
+    }
+
+  else if (strcmp (OPTION_COPY_GENERIC_NAME, option_name) == 0)
+    {
+      action = dfu_edit_action_new (DFU_COPY_KEY, "GenericName", "Name");
+      edit_actions = g_slist_prepend (edit_actions, action);
+    }
+
+  else if (strcmp (OPTION_SET_GENERIC_NAME, option_name) == 0)
+    {
+      action = dfu_edit_action_new (DFU_SET_KEY, "GenericName", value);
+      edit_actions = g_slist_prepend (edit_actions, action);
+    }
+
+  else if (strcmp (OPTION_COPY_NAME, option_name) == 0)
+    {
+      action = dfu_edit_action_new (DFU_COPY_KEY, "Name", "GenericName");
+      edit_actions = g_slist_prepend (edit_actions, action);
+    }
+
+  else if (strcmp (OPTION_SET_COMMENT, option_name) == 0)
+    {
+      action = dfu_edit_action_new (DFU_SET_KEY, "Comment", value);
+      edit_actions = g_slist_prepend (edit_actions, action);
+    }
+
+  else if (strcmp (OPTION_SET_ICON, option_name) == 0)
+    {
+      action = dfu_edit_action_new (DFU_SET_KEY, "Icon", value);
+      edit_actions = g_slist_prepend (edit_actions, action);
+    }
+
+  else if (strcmp (OPTION_ADD_CATEGORY, option_name) == 0)
+    {
+      PARSE_OPTION_LIST (DFU_ADD_TO_LIST, "Categories");
+    }
+
+  else if (strcmp (OPTION_REMOVE_CATEGORY, option_name) == 0)
+    {
+      PARSE_OPTION_LIST (DFU_REMOVE_FROM_LIST, "Categories");
+    }
+
+  else if (strcmp (OPTION_ADD_MIME_TYPE, option_name) == 0)
+    {
+      PARSE_OPTION_LIST (DFU_ADD_TO_LIST, "MimeType");
+    }
+
+  else if (strcmp (OPTION_REMOVE_MIME_TYPE, option_name) == 0)
+    {
+      PARSE_OPTION_LIST (DFU_REMOVE_FROM_LIST, "MimeType");
+    }
+
+  else if (strcmp (OPTION_ADD_ONLY_SHOW_IN, option_name) == 0)
+    {
+      PARSE_OPTION_LIST (DFU_ADD_TO_LIST, "OnlyShowIn");
+    }
+
+  else if (strcmp (OPTION_REMOVE_ONLY_SHOW_IN, option_name) == 0)
+    {
+      PARSE_OPTION_LIST (DFU_REMOVE_FROM_LIST, "OnlyShowIn");
+    }
+
+  else if (strcmp (OPTION_ADD_NOT_SHOW_IN, option_name) == 0)
+    {
+      PARSE_OPTION_LIST (DFU_ADD_TO_LIST, "NotShowIn");
+    }
+
+  else if (strcmp (OPTION_REMOVE_NOT_SHOW_IN, option_name) == 0)
+    {
+      PARSE_OPTION_LIST (DFU_REMOVE_FROM_LIST, "NotShowIn");
+    }
+
+  else if (strcmp (OPTION_REMOVE_KEY, option_name) == 0)
+    {
+      action = dfu_edit_action_new (DFU_REMOVE_KEY, value, NULL);
+      edit_actions = g_slist_prepend (edit_actions, action);
+    }
+
+  else
+    {
+      g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_FAILED,
+                   _("Unknown option \"%s\""), option_name);
+
+      return FALSE;
+    }
+
+  return TRUE;
+}
+
+static gboolean
+check_no_building_in_edit_actions (GError **error)
+{
+  GSList *tmp = edit_actions;
+
+  while (tmp != NULL)
+    {
+      /* If we have an action that is BUILDING, then it means that we had a
+       * --set-key not followed by a --set-value. This can happen when:
+       *   + the very last argument was --set-key
+       *   + --set-key was followed by another editing option
+       * In both cases, that's bad as what we want is a --set-value following
+       * each --set-key.
+       */
+      DfuEditAction *action = tmp->data;
+
+      if (action->type == DFU_SET_KEY_BUILDING)
+        {
+          g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_FAILED,
+                       _("Option \"--%s\" used without a following \"--%s\" option"),
+                       OPTION_SET_KEY, OPTION_SET_VALUE);
+
+          return FALSE;
+        }
+
+      tmp = tmp->next;
+    }
+
+  return TRUE;
+}
+
+static gboolean
+post_parse_edit_options_callback (GOptionContext  *context,
+                                  GOptionGroup    *group,
+                                  gpointer         data,
+                                  GError         **error)
+{
+  if (!check_no_building_in_edit_actions (error))
+    return FALSE;
+
+  /* Reverse list we created by prepending elements */
+  edit_actions = g_slist_reverse (edit_actions);
 
   return TRUE;
 }
@@ -517,57 +833,100 @@ main (int argc, char **argv)
   GOptionGroup *group;
   GError* err = NULL;
   int i;
+  int args_len;
   mode_t dir_permissions;
-  
+  char *basename;
+
   setlocale (LC_ALL, "");
-  
+
+  basename = g_path_get_basename (argv[0]);
+  if (g_strcmp0 (basename, "desktop-file-edit") == 0)
+    edit_mode = TRUE;
+  g_free (basename);
+
   context = g_option_context_new ("");
-  g_option_context_add_main_entries (context, options, NULL);
+  g_option_context_set_summary (context, edit_mode ? _("Edit a desktop file.") : _("Install desktop files."));
+  g_option_context_add_main_entries (context, main_options, NULL);
+
+  if (!edit_mode)
+    {
+      group = g_option_group_new ("install", _("Installation options for desktop file"), _("Show desktop file installation options"), NULL, NULL);
+      g_option_group_add_entries (group, install_options);
+      g_option_context_add_group (context, group);
+    }
 
   group = g_option_group_new ("edit", _("Edition options for desktop file"), _("Show desktop file edition options"), NULL, NULL);
   g_option_group_add_entries (group, edit_options);
+  g_option_group_set_parse_hooks (group, NULL, post_parse_edit_options_callback);
   g_option_context_add_group (context, group);
 
   err = NULL;
   g_option_context_parse (context, &argc, &argv, &err);
 
   if (err != NULL) {
-	  g_printerr ("%s\n", err->message);
-	  g_printerr (_("Run '%s --help' to see a full list of available command line options.\n"), argv[0]);
-	  g_error_free (err);
-	  return 1;
+    g_printerr ("%s\n", err->message);
+    g_printerr (_("Run '%s --help' to see a full list of available command line options.\n"), argv[0]);
+    g_error_free (err);
+    return 1;
   }
 
-  if (vendor_name == NULL && g_getenv ("DESKTOP_FILE_VENDOR"))
-    vendor_name = g_strdup (g_getenv ("DESKTOP_FILE_VENDOR"));
-  
-  if (copy_generic_name_to_name && copy_name_to_generic_name)
+  if (!edit_mode)
     {
-      g_printerr (_("Specifying both --copy-name-to-generic-name and --copy-generic-name-to-name at once doesn't make much sense.\n"));
-      return 1;
+      if (vendor_name == NULL && g_getenv ("DESKTOP_FILE_VENDOR"))
+        vendor_name = g_strdup (g_getenv ("DESKTOP_FILE_VENDOR"));
+
+      if (target_dir == NULL && g_getenv ("DESKTOP_FILE_INSTALL_DIR"))
+        target_dir = g_strdup (g_getenv ("DESKTOP_FILE_INSTALL_DIR"));
+
+      if (target_dir == NULL)
+        {
+          if (g_getenv ("RPM_BUILD_ROOT"))
+            target_dir = g_build_filename (g_getenv ("RPM_BUILD_ROOT"), DATADIR, "applications", NULL);
+          else
+            target_dir = g_build_filename (DATADIR, "applications", NULL);
+        }
+
+      /* Create the target directory */
+      dir_permissions = permissions;
+
+      /* Add search bit when the target file is readable */
+      if (permissions & 0400)
+        dir_permissions |= 0100;
+      if (permissions & 0040)
+        dir_permissions |= 0010;
+      if (permissions & 0004)
+        dir_permissions |= 0001;
+
+      g_mkdir_with_parents (target_dir, dir_permissions);
     }
-  
-  if (target_dir == NULL && g_getenv ("DESKTOP_FILE_INSTALL_DIR"))
-    target_dir = g_strdup (g_getenv ("DESKTOP_FILE_INSTALL_DIR"));
 
-  if (target_dir == NULL)
-    target_dir = g_build_filename (DATADIR, "applications", NULL);
+  args_len = 0;
+  for (i = 0; args && args[i]; i++)
+    args_len++;
 
-  /* Create the target directory */
-  dir_permissions = permissions;
+  if (edit_mode)
+    {
+      if (args_len == 0)
+        {
+          g_printerr (_("Must specify a desktop file to process.\n"));
+          return 1;
+        }
+      if (args_len > 1)
+        {
+          g_printerr (_("Only one desktop file can be processed at once.\n"));
+          return 1;
+        }
+    }
+  else
+    {
+      if (args_len == 0)
+        {
+          g_printerr (_("Must specify one or more desktop files to process.\n"));
+          return 1;
+        }
+    }
 
-  /* Add search bit when the target file is readable */
-  if (permissions & 0400)
-    dir_permissions |= 0100;
-  if (permissions & 0040)
-    dir_permissions |= 0010;
-  if (permissions & 0004)
-    dir_permissions |= 0001;
-
-  g_mkdir_with_parents (target_dir, dir_permissions);
-  
-  i = 0;
-  while (args && args[i])
+  for (i = 0; args && args[i]; i++)
     {
       err = NULL;
       process_one_file (args[i], &err);
@@ -575,22 +934,14 @@ main (int argc, char **argv)
         {
           g_printerr (_("Error on file \"%s\": %s\n"),
                       args[i], err->message);
-
           g_error_free (err);
-          
+
           return 1;
         }
-      
-      ++i;
     }
 
-  if (i == 0)
-    {
-      g_printerr (_("Must specify one or more desktop files to install\n"));
+  g_slist_free_full (edit_actions, (GDestroyNotify) dfu_edit_action_free);
 
-      return 1;
-    }
-  
   g_option_context_free (context);
 
   return 0;
