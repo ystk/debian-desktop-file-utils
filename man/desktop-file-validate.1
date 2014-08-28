@@ -6,10 +6,10 @@
 .SH NAME
 desktop-file-validate \- Validate desktop entry files
 .SH SYNOPSIS
-.B desktop-file-validate [\-\-no-warn-deprecated] [\-\-warn-kde] FILE...
+.B desktop-file-validate [\-\-no-hints] [\-\-no-warn-deprecated] [\-\-warn-kde] FILE...
 .SH DESCRIPTION
 The \fIdesktop-file-validate\fP program is a tool to validate desktop
-entry files according to the Desktop Entry specification 1.0.
+entry files according to the Desktop Entry specification 1.1.
 .PP
 The specification describes a file format to provide information such as
 name, icon and description for an application. Such a file can then be
@@ -22,6 +22,9 @@ For information about the Desktop Entry specification, see
 The desktop entry files are commonly called \fBdesktop files\fP.
 .SH OPTIONS
 The following options are supported:
+.TP
+.I --no-hints
+Do not output hints about things that might be improved in the desktop file.
 .TP
 .I --no-warn-deprecated
 Do not warn about usage of deprecated items that were defined in

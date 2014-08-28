@@ -1,4 +1,40 @@
 ============
+Version 0.22
+============
+
+ desktop-file-validate
+  - add DBusActivatable key to allowed keys (Matthias Clasen)
+  - warn about OnlyShowIn in Action groups (Matthias Clasen)
+  - allow validating multiple desktop files (Matthias Clasen)
+  - improve help output (Matthias Clasen)
+  - update man page (Matthias Clasen)
+
+ update-desktop-database
+  - list only once a desktop file per mime type (Vincent)
+
+ misc
+  - honor NOCONFIGURE=1 (Colin Walters)
+
+============
+Version 0.21
+============
+
+ desktop-file-validate
+  - update to current version of menu specification (Vincent):
+    - only print hint if no main category is present, not an error
+    - make Science a main category
+    - add new registered categories: Adult, Feed, Humanities, Maps,
+      Shooter, Spirituality, XFCE
+    - update related categories
+    - add TDE to list of registered OnlyShowIn
+  - accept and validate GNOME3/GSettings for AutostartCondition (Vincent)
+  - output hint if more than one main category is present (Vincent)
+  - output hint about suggested related categories (Vincent)
+
+ misc
+  - do not require glib >= 2.28 for build (Vincent)
+
+============
 Version 0.20
 ============
 

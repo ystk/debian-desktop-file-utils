@@ -29,13 +29,15 @@
 #include "validate.h"
 
 static gboolean   warn_kde = FALSE;
+static gboolean   no_hints = FALSE;
 static gboolean   no_warn_deprecated = FALSE;
 static char     **filename = NULL;
 
 static GOptionEntry option_entries[] = {
+  { "no-hints", 0, 0, G_OPTION_ARG_NONE, &no_hints, "Do not output hints to improve desktop file", NULL },
   { "no-warn-deprecated", 0, 0, G_OPTION_ARG_NONE, &no_warn_deprecated, "Do not warn about usage of deprecated items", NULL },
-  { "warn-kde", 0, 0, G_OPTION_ARG_NONE, &warn_kde, "Warn about usage of KDE extensions to the specification", NULL },
-  { G_OPTION_REMAINING, 0, 0, G_OPTION_ARG_FILENAME_ARRAY, &filename, NULL, "<desktop-file>" },
+  { "warn-kde", 0, 0, G_OPTION_ARG_NONE, &warn_kde, "Warn if KDE extensions to the specification are used", NULL },
+  { G_OPTION_REMAINING, 0, 0, G_OPTION_ARG_FILENAME_ARRAY, &filename, NULL, "<desktop-file>..." },
   { NULL }
 };
 
@@ -44,6 +46,8 @@ main (int argc, char *argv[])
 {
   GOptionContext *context;
   GError         *error;
+  int i;
+  gboolean all_valid;
 
   context = g_option_context_new (NULL);
   g_option_context_set_summary (context, "Validate desktop entry files "
@@ -64,19 +68,22 @@ main (int argc, char *argv[])
 
   g_option_context_free (context);
 
-  /* only accept one desktop file argument */
-  if (filename == NULL || filename[0] == NULL || filename[1] != NULL) {
+  if (filename == NULL || filename[0] == NULL) {
     g_printerr ("See \"%s --help\" for correct usage.\n", g_get_prgname ());
     return 1;
   }
 
-  if (!g_file_test (filename[0], G_FILE_TEST_IS_REGULAR)) {
-    g_printerr ("%s: file does not exist\n", filename[0]);
-    return 1;
+  all_valid = TRUE;
+  for (i = 0; filename[i]; i++) {
+    if (!g_file_test (filename[i], G_FILE_TEST_IS_REGULAR)) {
+      g_printerr ("%s: file does not exist\n", filename[i]);
+      all_valid = FALSE;
+    } else if (!desktop_file_validate (filename[i], warn_kde, no_warn_deprecated, no_hints))
+      all_valid = FALSE;
   }
 
-  if (desktop_file_validate (filename[0], warn_kde, no_warn_deprecated))
-    return 0;
-  else
+  if (!all_valid)
     return 1;
+
+  return 0;
 }

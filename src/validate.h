@@ -27,14 +27,15 @@
 
 #include <glib.h>
 
-#define CURRENT_SPEC_VERSION "1.0"
+#define CURRENT_SPEC_VERSION "1.1"
 
 #define GROUP_KDE_DESKTOP_ENTRY "KDE Desktop Entry"
 #define GROUP_DESKTOP_ACTION "Desktop Action "
 
 gboolean desktop_file_validate (const char *filename,
 				gboolean    warn_kde,
-				gboolean    no_warn_deprecated);
+				gboolean    no_warn_deprecated,
+				gboolean    no_hints);
 gboolean desktop_file_fixup    (GKeyFile   *keyfile,
                                 const char *filename);
 
