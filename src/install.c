@@ -248,7 +248,7 @@ process_one_file (const char *filename,
   g_key_file_free (kf);
 
   /* Load and validate the file we just wrote */
-  if (!desktop_file_validate (new_filename, FALSE, TRUE))
+  if (!desktop_file_validate (new_filename, FALSE, TRUE, TRUE))
     {
       g_set_error (err, G_KEY_FILE_ERROR, G_KEY_FILE_ERROR_PARSE,
                    _("Failed to validate the created desktop file"));
@@ -940,7 +940,12 @@ main (int argc, char **argv)
         }
     }
 
+#if GLIB_CHECK_VERSION(2,28,0)
   g_slist_free_full (edit_actions, (GDestroyNotify) dfu_edit_action_free);
+#else
+  g_slist_foreach (edit_actions, (GFunc) dfu_edit_action_free, NULL);
+  g_slist_free (edit_actions);
+#endif
 
   g_option_context_free (context);
 

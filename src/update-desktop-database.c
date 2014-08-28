@@ -83,6 +83,13 @@ cache_desktop_file (const char  *desktop_file,
 
   desktop_files = (GList *) g_hash_table_lookup (mime_types_map, mime_type);
 
+  /* do not add twice a desktop file mentioning the mime type more than once
+   * (no need to use g_list_find() because we cache all mime types registered
+   * by a desktop file before moving to another desktop file) */
+  if (desktop_files &&
+      strcmp (desktop_file, (const char *) desktop_files->data) == 0)
+    return;
+
   desktop_files = g_list_prepend (desktop_files, g_strdup (desktop_file));
   g_hash_table_insert (mime_types_map, g_strdup (mime_type), desktop_files);
 }

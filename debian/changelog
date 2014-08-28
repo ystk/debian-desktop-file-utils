@@ -1,3 +1,27 @@
+desktop-file-utils (0.22-1) unstable; urgency=low
+
+  * New upstream release [August 2013].
+
+ -- Dmitry Smirnov <onlyjob@debian.org>  Sun, 01 Sep 2013 04:21:24 +1000
+
+desktop-file-utils (0.21-1) unstable; urgency=low
+
+  * New upstream release [October 2012] (Closes: #671600).
+  * Multi-Arch: foreign (Closes: #694845).
+  * Watch file update (Closes: #690279).
+  * Source and binary package compression to xz.
+  * Added Homepage.
+  * Standards to current 3.9.4
+  * debhelper to version 9.
+  * copyright to copyright-format 1.0; updated contributor's list.
+  * autotools-dev --> dh-autoreconf.
+  * Increased build log verbosity.
+  * lintian-overrides for hardening false-positives.
+  * Added myself to Uploaders (Closes: #700917).
+  * Added VCS links to pkg-freedesktop repository.
+
+ -- Dmitry Smirnov <onlyjob@debian.org>  Mon, 13 May 2013 14:15:29 +1000
+
 desktop-file-utils (0.20-0.1) unstable; urgency=low
 
   * Non-maintainer upload.
